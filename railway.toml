@@ -1,0 +1,14 @@
+# Railway configuration for NesOpenWritter-Backend.
+# Docs: https://docs.railway.app/reference/config-as-code
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "pnpm install --frozen-lockfile=false && pnpm prisma:generate && pnpm build"
+
+[deploy]
+# Run pending migrations, then start the API.
+startCommand = "pnpm prisma:migrate:deploy && pnpm start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+healthcheckPath = "/health"
+healthcheckTimeout = 30

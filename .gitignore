@@ -1,0 +1,33 @@
+# Logs
+*.log
+pnpm-debug.log*
+npm-debug.log*
+
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Build
+/dist
+.tsbuildinfo
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Prisma (generated client)
+prisma/.cache
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+
+# Railway
+.railway
