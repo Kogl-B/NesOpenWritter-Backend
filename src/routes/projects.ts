@@ -1,12 +1,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 
-import type { Prisma } from '@prisma/client';
-
 import { prisma } from '../lib/prisma.js';
+import { toJson } from '../lib/access.js';
 import { projectCreateSchema, projectUpdateSchema } from '../lib/schemas.js';
-
-const toJson = (v: Record<string, unknown> | undefined): Prisma.InputJsonValue =>
-  (v ?? {}) as Prisma.InputJsonValue;
 
 export const projectRoutes: FastifyPluginAsync = async (app) => {
   app.addHook('onRequest', async (req) => {

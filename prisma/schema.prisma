@@ -1,5 +1,6 @@
 // NesOpenWritter — backend Prisma schema
-// Этап 1: Better-Auth core + Project + Character.
+// Этапы 0–2: Better-Auth core + domain (Project, Character, Item, Location,
+// TimelineEvent, Chapter, Tag + связи).
 
 generator client {
   provider = "prisma-client-js"
@@ -81,7 +82,7 @@ model Verification {
 }
 
 // ---------------------------------------------------------------------------
-// Domain models
+// Project (root of every domain object)
 // ---------------------------------------------------------------------------
 
 model Project {
@@ -93,15 +94,24 @@ model Project {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  owner      User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  owner      User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   characters Character[]
+  items      Item[]
+  locations  Location[]
+  events     TimelineEvent[]
+  chapters   Chapter[]
+  tags       Tag[]
 
   @@index([ownerId])
   @@map("projects")
 }
 
+// ---------------------------------------------------------------------------
+// Characters
+// ---------------------------------------------------------------------------
+
 model Character {
-  id           String    @id @default(cuid())
+  id           String   @id @default(cuid())
   projectId    String
   name         String
   shortName    String?
@@ -109,17 +119,300 @@ model Character {
   summary      String?
   biography    String?
   faction      String?
-  status       String    @default("alive")
+  status       String   @default("alive")
   dateOfBirth  String?
   dateOfDeath  String?
-  traits       String[]  @default([])
-  abilities    String[]  @default([])
-  metadata     Json      @default("{}")
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  traits       String[] @default([])
+  abilities    String[] @default([])
+  metadata     Json     @default("{}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
+  // outgoing/incoming relations
+  outgoingRelations CharacterRelation[] @relation("CharacterRelationFrom")
+  incomingRelations CharacterRelation[] @relation("CharacterRelationTo")
+
+  // genealogy edges
+  asParent GenealogyEdge[] @relation("GenealogyParent")
+  asChild  GenealogyEdge[] @relation("GenealogyChild")
+
+  // event participation
+  eventLinks EventCharacter[]
+
+  // map positions
+  positions CharacterPosition[]
+
+  // items currently owned
+  ownedItems Item[] @relation("ItemCurrentOwner")
+
   @@index([projectId])
   @@map("characters")
+}
+
+model CharacterRelation {
+  id              String   @id @default(cuid())
+  projectId       String
+  fromCharacterId String
+  toCharacterId   String
+  relationType    String
+  strength        Int      @default(50)
+  description     String?
+  createdAt       DateTime @default(now())
+
+  fromCharacter Character @relation("CharacterRelationFrom", fields: [fromCharacterId], references: [id], onDelete: Cascade)
+  toCharacter   Character @relation("CharacterRelationTo", fields: [toCharacterId], references: [id], onDelete: Cascade)
+
+  @@unique([fromCharacterId, toCharacterId, relationType])
+  @@index([projectId])
+  @@index([fromCharacterId])
+  @@index([toCharacterId])
+  @@map("character_relations")
+}
+
+model GenealogyEdge {
+  id        String   @id @default(cuid())
+  projectId String
+  parentId  String
+  childId   String
+  kind      String   @default("biological")
+  createdAt DateTime @default(now())
+
+  parent Character @relation("GenealogyParent", fields: [parentId], references: [id], onDelete: Cascade)
+  child  Character @relation("GenealogyChild", fields: [childId], references: [id], onDelete: Cascade)
+
+  @@unique([parentId, childId, kind])
+  @@index([projectId])
+  @@map("genealogy_edges")
+}
+
+// ---------------------------------------------------------------------------
+// Items
+// ---------------------------------------------------------------------------
+
+model Item {
+  id                String   @id @default(cuid())
+  projectId         String
+  name              String
+  shortName         String?
+  imagePath         String?
+  category          String   @default("other")
+  rarity            String   @default("common")
+  summary           String?
+  description       String?
+  properties        Json     @default("{}")
+  currentOwnerId    String?
+  currentLocationId String?
+  metadata          Json     @default("{}")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  project         Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  currentOwner    Character?          @relation("ItemCurrentOwner", fields: [currentOwnerId], references: [id], onDelete: SetNull)
+  currentLocation Location?           @relation("ItemCurrentLocation", fields: [currentLocationId], references: [id], onDelete: SetNull)
+  timelinePoints  ItemTimelinePoint[]
+  eventLinks      EventItem[]
+
+  @@index([projectId])
+  @@index([currentOwnerId])
+  @@index([currentLocationId])
+  @@map("items")
+}
+
+model ItemTimelinePoint {
+  id         String   @id @default(cuid())
+  projectId  String
+  itemId     String
+  at         String
+  ownerId    String?
+  locationId String?
+  eventId    String?
+  note       String?
+  orderIndex Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([itemId])
+  @@map("item_timeline_points")
+}
+
+// ---------------------------------------------------------------------------
+// Locations
+// ---------------------------------------------------------------------------
+
+model Location {
+  id               String   @id @default(cuid())
+  projectId        String
+  name             String
+  shortName        String?
+  kind             String   @default("place")
+  parentLocationId String?
+  lodLevel         Int      @default(0)
+  coordX           Float?
+  coordY           Float?
+  description      String?
+  metadata         Json     @default("{}")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  project        Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parentLocation Location?  @relation("LocationHierarchy", fields: [parentLocationId], references: [id], onDelete: SetNull)
+  children       Location[] @relation("LocationHierarchy")
+
+  // back-relations
+  itemsHere   TimelineEvent[]
+  itemsHosted Item[]              @relation("ItemCurrentLocation")
+  positions   CharacterPosition[]
+
+  @@index([projectId])
+  @@index([parentLocationId])
+  @@map("locations")
+}
+
+// ---------------------------------------------------------------------------
+// Timeline events
+// ---------------------------------------------------------------------------
+
+model TimelineEvent {
+  id              String   @id @default(cuid())
+  projectId       String
+  name            String
+  summary         String?
+  description     String?
+  at              String
+  atNumeric       Float?
+  durationNumeric Float?
+  locationId      String?
+  color           String?
+  icon            String?
+  importance      Int      @default(3)
+  metadata        Json     @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  project    Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  location   Location?           @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  characters EventCharacter[]
+  items      EventItem[]
+  positions  CharacterPosition[]
+  chapters   Chapter[]
+
+  @@index([projectId])
+  @@index([locationId])
+  @@map("timeline_events")
+}
+
+model EventCharacter {
+  eventId     String
+  characterId String
+  role        String   @default("participant")
+  note        String?
+  createdAt   DateTime @default(now())
+
+  event     TimelineEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  character Character     @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  @@id([eventId, characterId])
+  @@index([characterId])
+  @@map("event_characters")
+}
+
+model EventItem {
+  eventId   String
+  itemId    String
+  note      String?
+  createdAt DateTime @default(now())
+
+  event TimelineEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  item  Item          @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@id([eventId, itemId])
+  @@index([itemId])
+  @@map("event_items")
+}
+
+model CharacterPosition {
+  id          String   @id @default(cuid())
+  projectId   String
+  characterId String
+  eventId     String
+  locationId  String?
+  coordX      Float?
+  coordY      Float?
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now())
+
+  character Character     @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  event     TimelineEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  location  Location?     @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  @@unique([characterId, eventId])
+  @@index([projectId])
+  @@map("character_positions")
+}
+
+// ---------------------------------------------------------------------------
+// Chapters / scenes (Phase 4 base — model only, editor wiring later)
+// ---------------------------------------------------------------------------
+
+model Chapter {
+  id         String   @id @default(cuid())
+  projectId  String
+  parentId   String?
+  kind       String   @default("chapter")
+  title      String
+  summary    String?
+  content    Json     @default("{}")
+  orderIndex Int      @default(0)
+  wordCount  Int      @default(0)
+  eventId    String?
+  locationId String?
+  metadata   Json     @default("{}")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  project  Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent   Chapter?       @relation("ChapterTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children Chapter[]      @relation("ChapterTree")
+  event    TimelineEvent? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([parentId])
+  @@map("chapters")
+}
+
+// ---------------------------------------------------------------------------
+// Tags (polymorphic — links via EntityTag with entityType discriminator)
+// ---------------------------------------------------------------------------
+
+model Tag {
+  id          String   @id @default(cuid())
+  projectId   String
+  name        String
+  color       String   @default("#888888")
+  description String?
+  createdAt   DateTime @default(now())
+
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  links   EntityTag[]
+
+  @@unique([projectId, name])
+  @@index([projectId])
+  @@map("tags")
+}
+
+model EntityTag {
+  tagId      String
+  entityType String
+  entityId   String
+  createdAt  DateTime @default(now())
+
+  tag Tag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([tagId, entityType, entityId])
+  @@index([entityType, entityId])
+  @@map("entity_tags")
 }

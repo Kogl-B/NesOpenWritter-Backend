@@ -12,6 +12,11 @@ import { healthRoutes } from './routes/health.js';
 import { meRoutes } from './routes/me.js';
 import { projectRoutes } from './routes/projects.js';
 import { characterRoutes } from './routes/characters.js';
+import { itemRoutes } from './routes/items.js';
+import { locationRoutes } from './routes/locations.js';
+import { eventRoutes } from './routes/events.js';
+import { chapterRoutes } from './routes/chapters.js';
+import { tagRoutes } from './routes/tags.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -51,6 +56,11 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(meRoutes);
   await app.register(projectRoutes);
   await app.register(characterRoutes);
+  await app.register(itemRoutes);
+  await app.register(locationRoutes);
+  await app.register(eventRoutes);
+  await app.register(chapterRoutes);
+  await app.register(tagRoutes);
 
   return app;
 }

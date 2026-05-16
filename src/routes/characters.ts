@@ -1,38 +1,33 @@
 import type { FastifyPluginAsync } from 'fastify';
 
-import type { Prisma } from '@prisma/client';
-
 import { prisma } from '../lib/prisma.js';
-import { characterCreateSchema, characterUpdateSchema } from '../lib/schemas.js';
-
-const toJson = (v: Record<string, unknown> | undefined): Prisma.InputJsonValue =>
-  (v ?? {}) as Prisma.InputJsonValue;
+import { assertProjectOwnership, toJson } from '../lib/access.js';
+import {
+  characterCreateSchema,
+  characterUpdateSchema,
+  characterRelationCreateSchema,
+  characterRelationUpdateSchema,
+  genealogyCreateSchema,
+} from '../lib/schemas.js';
 
 type ProjectParam = { projectId: string };
 type CharacterParam = { projectId: string; characterId: string };
-
-async function assertProjectOwnership(
-  projectId: string,
-  userId: string,
-): Promise<boolean> {
-  const project = await prisma.project.findFirst({
-    where: { id: projectId, ownerId: userId },
-    select: { id: true },
-  });
-  return project !== null;
-}
+type RelationParam = { projectId: string; relationId: string };
+type GenealogyParam = { projectId: string; edgeId: string };
 
 export const characterRoutes: FastifyPluginAsync = async (app) => {
   app.addHook('onRequest', async (req) => {
     app.requireAuth(req);
   });
 
+  // ----- Character CRUD ----------------------------------------------------
+
   app.get<{ Params: ProjectParam }>(
     '/api/projects/:projectId/characters',
     async (req, reply) => {
-      const owns = await assertProjectOwnership(req.params.projectId, req.user!.id);
-      if (!owns) return reply.status(404).send({ error: 'Project not found' });
-
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
       const characters = await prisma.character.findMany({
         where: { projectId: req.params.projectId },
         orderBy: { updatedAt: 'desc' },
@@ -44,9 +39,9 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
   app.post<{ Params: ProjectParam }>(
     '/api/projects/:projectId/characters',
     async (req, reply) => {
-      const owns = await assertProjectOwnership(req.params.projectId, req.user!.id);
-      if (!owns) return reply.status(404).send({ error: 'Project not found' });
-
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
       const input = characterCreateSchema.parse(req.body);
       const character = await prisma.character.create({
         data: {
@@ -72,9 +67,9 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Params: CharacterParam }>(
     '/api/projects/:projectId/characters/:characterId',
     async (req, reply) => {
-      const owns = await assertProjectOwnership(req.params.projectId, req.user!.id);
-      if (!owns) return reply.status(404).send({ error: 'Project not found' });
-
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
       const character = await prisma.character.findFirst({
         where: { id: req.params.characterId, projectId: req.params.projectId },
       });
@@ -86,9 +81,9 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
   app.patch<{ Params: CharacterParam }>(
     '/api/projects/:projectId/characters/:characterId',
     async (req, reply) => {
-      const owns = await assertProjectOwnership(req.params.projectId, req.user!.id);
-      if (!owns) return reply.status(404).send({ error: 'Project not found' });
-
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
       const input = characterUpdateSchema.parse(req.body);
       const result = await prisma.character.updateMany({
         where: { id: req.params.characterId, projectId: req.params.projectId },
@@ -118,14 +113,175 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
   app.delete<{ Params: CharacterParam }>(
     '/api/projects/:projectId/characters/:characterId',
     async (req, reply) => {
-      const owns = await assertProjectOwnership(req.params.projectId, req.user!.id);
-      if (!owns) return reply.status(404).send({ error: 'Project not found' });
-
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
       const result = await prisma.character.deleteMany({
         where: { id: req.params.characterId, projectId: req.params.projectId },
       });
       if (result.count === 0) return reply.status(404).send({ error: 'Character not found' });
       return reply.status(204).send();
+    },
+  );
+
+  // ----- Character relations -----------------------------------------------
+
+  app.get<{ Params: ProjectParam }>(
+    '/api/projects/:projectId/character-relations',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const relations = await prisma.characterRelation.findMany({
+        where: { projectId: req.params.projectId },
+        orderBy: { createdAt: 'asc' },
+      });
+      return { relations };
+    },
+  );
+
+  app.post<{ Params: ProjectParam }>(
+    '/api/projects/:projectId/character-relations',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const input = characterRelationCreateSchema.parse(req.body);
+      // verify both characters belong to this project
+      const count = await prisma.character.count({
+        where: {
+          projectId: req.params.projectId,
+          id: { in: [input.fromCharacterId, input.toCharacterId] },
+        },
+      });
+      if (count !== 2) {
+        return reply.status(400).send({ error: 'Both characters must belong to project' });
+      }
+      const relation = await prisma.characterRelation.create({
+        data: {
+          projectId: req.params.projectId,
+          fromCharacterId: input.fromCharacterId,
+          toCharacterId: input.toCharacterId,
+          relationType: input.relationType,
+          strength: input.strength ?? 50,
+          description: input.description ?? null,
+        },
+      });
+      return reply.status(201).send({ relation });
+    },
+  );
+
+  app.patch<{ Params: RelationParam }>(
+    '/api/projects/:projectId/character-relations/:relationId',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const input = characterRelationUpdateSchema.parse(req.body);
+      const result = await prisma.characterRelation.updateMany({
+        where: { id: req.params.relationId, projectId: req.params.projectId },
+        data: {
+          ...(input.relationType !== undefined && { relationType: input.relationType }),
+          ...(input.strength !== undefined && { strength: input.strength }),
+          ...(input.description !== undefined && { description: input.description }),
+        },
+      });
+      if (result.count === 0) return reply.status(404).send({ error: 'Relation not found' });
+      const relation = await prisma.characterRelation.findUnique({
+        where: { id: req.params.relationId },
+      });
+      return { relation };
+    },
+  );
+
+  app.delete<{ Params: RelationParam }>(
+    '/api/projects/:projectId/character-relations/:relationId',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const result = await prisma.characterRelation.deleteMany({
+        where: { id: req.params.relationId, projectId: req.params.projectId },
+      });
+      if (result.count === 0) return reply.status(404).send({ error: 'Relation not found' });
+      return reply.status(204).send();
+    },
+  );
+
+  // ----- Genealogy ---------------------------------------------------------
+
+  app.get<{ Params: ProjectParam }>(
+    '/api/projects/:projectId/genealogy',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const edges = await prisma.genealogyEdge.findMany({
+        where: { projectId: req.params.projectId },
+        orderBy: { createdAt: 'asc' },
+      });
+      return { edges };
+    },
+  );
+
+  app.post<{ Params: ProjectParam }>(
+    '/api/projects/:projectId/genealogy',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const input = genealogyCreateSchema.parse(req.body);
+      if (input.parentId === input.childId) {
+        return reply.status(400).send({ error: 'parentId and childId must differ' });
+      }
+      const count = await prisma.character.count({
+        where: {
+          projectId: req.params.projectId,
+          id: { in: [input.parentId, input.childId] },
+        },
+      });
+      if (count !== 2) {
+        return reply.status(400).send({ error: 'Both characters must belong to project' });
+      }
+      const edge = await prisma.genealogyEdge.create({
+        data: {
+          projectId: req.params.projectId,
+          parentId: input.parentId,
+          childId: input.childId,
+          kind: input.kind ?? 'biological',
+        },
+      });
+      return reply.status(201).send({ edge });
+    },
+  );
+
+  app.delete<{ Params: GenealogyParam }>(
+    '/api/projects/:projectId/genealogy/:edgeId',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const result = await prisma.genealogyEdge.deleteMany({
+        where: { id: req.params.edgeId, projectId: req.params.projectId },
+      });
+      if (result.count === 0) return reply.status(404).send({ error: 'Edge not found' });
+      return reply.status(204).send();
+    },
+  );
+
+  // ----- Character positions ----------------------------------------------
+
+  app.get<{ Params: ProjectParam }>(
+    '/api/projects/:projectId/character-positions',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const positions = await prisma.characterPosition.findMany({
+        where: { projectId: req.params.projectId },
+        orderBy: { createdAt: 'asc' },
+      });
+      return { positions };
     },
   );
 };

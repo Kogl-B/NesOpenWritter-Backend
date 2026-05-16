@@ -6,6 +6,7 @@ API-сервис для OpenWritter. Стек: **Fastify 5 + Prisma 5 + PostgreS
 
 - **Этап 0** — каркас, `/health`, Docker, Railway-конфиг
 - **Этап 1** — auth (email+password, Google OAuth), Project + Character CRUD
+- **Этап 2** — Item, Location, TimelineEvent, Chapter, Tag + связи (relations, genealogy, event-character, event-item, character-positions, polymorphic tag-links)
 
 ## Структура
 
@@ -20,12 +21,18 @@ backend/
 │   │   ├── health.ts            # GET /health
 │   │   ├── me.ts                # GET /api/me
 │   │   ├── projects.ts          # /api/projects CRUD
-│   │   └── characters.ts        # /api/projects/:projectId/characters CRUD
+│   │   ├── characters.ts        # characters + relations + genealogy + positions list
+│   │   ├── items.ts             # items + item timeline points
+│   │   ├── locations.ts         # locations (hierarchical)
+│   │   ├── events.ts            # events + event-character/item + position write
+│   │   ├── chapters.ts          # chapters + scenes
+│   │   └── tags.ts              # tags + polymorphic assign/unassign
 │   └── lib/
 │       ├── env.ts               # Zod-валидация process.env
 │       ├── logger.ts            # pino config (dev: pretty)
 │       ├── prisma.ts            # PrismaClient singleton
 │       ├── auth.ts              # Better-Auth config
+│       ├── access.ts            # assertProjectOwnership, toJson helpers
 │       └── schemas.ts           # Zod-схемы входов
 ├── prisma/
 │   ├── schema.prisma            # User/Session/Account/Verification + Project + Character
@@ -50,11 +57,35 @@ backend/
 | `DELETE` | `/api/projects/:id` | да | удалить (каскадно сносит characters) |
 | `GET` | `/api/projects/:projectId/characters` | да | список персонажей |
 | `POST` | `/api/projects/:projectId/characters` | да | создать персонажа |
-| `GET` | `/api/projects/:projectId/characters/:characterId` | да | получить |
-| `PATCH` | `/api/projects/:projectId/characters/:characterId` | да | частичное обновление |
-| `DELETE` | `/api/projects/:projectId/characters/:characterId` | да | удалить |
+| `GET\|PATCH\|DELETE` | `/api/projects/:projectId/characters/:characterId` | да | получить/изменить/удалить |
+| `GET\|POST` | `/api/projects/:projectId/character-relations` | да | связи (friend/enemy/lover/...) |
+| `PATCH\|DELETE` | `/api/projects/:projectId/character-relations/:relationId` | да | |
+| `GET\|POST` | `/api/projects/:projectId/genealogy` | да | родительские связи |
+| `DELETE` | `/api/projects/:projectId/genealogy/:edgeId` | да | |
+| `GET\|POST` | `/api/projects/:projectId/items` | да | предметы |
+| `GET\|PATCH\|DELETE` | `/api/projects/:projectId/items/:itemId` | да | |
+| `GET\|POST` | `/api/projects/:projectId/items/:itemId/timeline` | да | item timeline points (история владения) |
+| `PATCH\|DELETE` | `.../timeline/:pointId` | да | |
+| `GET\|POST` | `/api/projects/:projectId/locations` | да | локации (поддерживают `parentLocationId`) |
+| `GET\|PATCH\|DELETE` | `/api/projects/:projectId/locations/:locationId` | да | |
+| `GET\|POST` | `/api/projects/:projectId/events` | да | timeline events |
+| `GET\|PATCH\|DELETE` | `/api/projects/:projectId/events/:eventId` | да | |
+| `GET\|POST` | `/api/projects/:projectId/events/:eventId/characters` | да | event-character (role) |
+| `PATCH\|DELETE` | `.../events/:eventId/characters/:characterId` | да | |
+| `GET\|POST` | `/api/projects/:projectId/events/:eventId/items` | да | event-item |
+| `PATCH\|DELETE` | `.../events/:eventId/items/:itemId` | да | |
+| `GET` | `/api/projects/:projectId/character-positions` | да | список позиций на карте по событиям |
+| `POST` | `/api/projects/:projectId/character-positions` | да | (uniq `characterId+eventId`) |
+| `PATCH\|DELETE` | `.../character-positions/:positionId` | да | |
+| `GET\|POST` | `/api/projects/:projectId/chapters` | да | chapters + scenes (древовидно) |
+| `GET\|PATCH\|DELETE` | `/api/projects/:projectId/chapters/:chapterId` | да | |
+| `GET\|POST` | `/api/projects/:projectId/tags` | да | tags (uniq name на проект) |
+| `PATCH\|DELETE` | `/api/projects/:projectId/tags/:tagId` | да | |
+| `POST` | `/api/projects/:projectId/tags/:tagId/assign` | да | привязать тег к entity (character/item/location/event/chapter/scene) |
+| `DELETE` | `/api/projects/:projectId/tags/:tagId/assign/:entityType/:entityId` | да | отвязать |
+| `GET` | `/api/projects/:projectId/tag-links/:entityType/:entityId` | да | все теги entity (с join на tag) |
 
-Все защищённые роуты возвращают **401** без валидного cookie. Изоляция проверяется по `ownerId` — другой пользователь видит **404** для чужих ресурсов.
+Все защищённые роуты возвращают **401** без валидного cookie. Изоляция проверяется по `ownerId` (для проектов) либо через `assertProjectOwnership` (для всех подресурсов) — другой пользователь видит **404** для чужих ресурсов. Cross-project references (например, link `eventId` из чужого проекта к character) возвращают **400**.
 
 ## Запуск локально
 
