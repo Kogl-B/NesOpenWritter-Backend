@@ -1,0 +1,13 @@
+node_modules
+dist
+*.log
+*.tsbuildinfo
+
+.env
+.env.local
+.env.*.local
+
+# Prisma generated client (regenerated on install)
+src/generated
+
+.DS_Store
