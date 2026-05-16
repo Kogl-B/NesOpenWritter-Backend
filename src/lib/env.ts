@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { config } from 'dotenv';
+
+config();
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
@@ -6,18 +9,26 @@ const envSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
-  DATABASE_URL: z.string().url().optional(),
+  DATABASE_URL: z.string().url(),
 
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
 
-  BETTER_AUTH_SECRET: z.string().min(32).optional(),
-  BETTER_AUTH_URL: z.string().url().optional(),
+  BETTER_AUTH_SECRET: z.string().min(32),
+  BETTER_AUTH_URL: z.string().url(),
+
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
 
   R2_ACCOUNT_ID: z.string().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
   R2_BUCKET: z.string().optional(),
-  R2_PUBLIC_BASE_URL: z.string().url().optional(),
+  R2_PUBLIC_BASE_URL: z
+    .string()
+    .url()
+    .or(z.literal(''))
+    .optional()
+    .transform((v) => (v === '' ? undefined : v)),
 });
 
 const parsed = envSchema.safeParse(process.env);

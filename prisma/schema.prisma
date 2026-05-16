@@ -1,6 +1,5 @@
 // NesOpenWritter — backend Prisma schema
-// Этап 0: только модели для Better-Auth (User/Session/Account/Verification).
-// Domain-модели (Project, Character, ...) добавятся в Этапе 1.
+// Этап 1: Better-Auth core + Project + Character.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,7 +12,6 @@ datasource db {
 
 // ---------------------------------------------------------------------------
 // Better-Auth core models
-// Поля соответствуют ожиданиям Better-Auth (см. https://better-auth.com/docs).
 // ---------------------------------------------------------------------------
 
 model User {
@@ -27,6 +25,7 @@ model User {
 
   sessions Session[]
   accounts Account[]
+  projects Project[]
 
   @@map("users")
 }
@@ -79,4 +78,48 @@ model Verification {
 
   @@index([identifier])
   @@map("verifications")
+}
+
+// ---------------------------------------------------------------------------
+// Domain models
+// ---------------------------------------------------------------------------
+
+model Project {
+  id          String   @id @default(cuid())
+  ownerId     String
+  name        String
+  description String?
+  settings    Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner      User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  characters Character[]
+
+  @@index([ownerId])
+  @@map("projects")
+}
+
+model Character {
+  id           String    @id @default(cuid())
+  projectId    String
+  name         String
+  shortName    String?
+  portraitPath String?
+  summary      String?
+  biography    String?
+  faction      String?
+  status       String    @default("alive")
+  dateOfBirth  String?
+  dateOfDeath  String?
+  traits       String[]  @default([])
+  abilities    String[]  @default([])
+  metadata     Json      @default("{}")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("characters")
 }

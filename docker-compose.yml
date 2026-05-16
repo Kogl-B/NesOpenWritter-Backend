@@ -1,0 +1,28 @@
+# Local development Postgres for NesOpenWritter backend.
+# Production runs on Railway Postgres addon — this is dev only.
+#
+# Start:  pnpm db:up   (or: docker compose up -d)
+# Stop:   pnpm db:down (or: docker compose down)
+# Wipe:   docker compose down -v   # drops the volume
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nesopenwritter_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nesopenwritter
+    ports:
+      - "5434:5432"
+    volumes:
+      - nesopenwritter_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nesopenwritter"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  nesopenwritter_pgdata:
