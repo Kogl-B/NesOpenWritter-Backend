@@ -65,14 +65,28 @@ const authPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
+  // TEMP: debug endpoint to inspect headers behind the Vercel proxy.
+  // Returns what the backend actually receives so we can diagnose Origin
+  // / X-Forwarded-* mangling. Remove once sign-out is confirmed working.
+  app.get('/api/_debug/headers', async (req) => {
+    return {
+      protocol: req.protocol,
+      hostname: req.hostname,
+      url: req.url,
+      headers: req.headers,
+    };
+  });
+
   app.route({
     method: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
     url: '/api/auth/*',
     handler: async (req, reply) => {
       const url = new URL(req.url, `${req.protocol}://${req.hostname}`);
+      const reqHeaders = toWebHeaders(req.headers);
+
       const request = new Request(url, {
         method: req.method,
-        headers: toWebHeaders(req.headers),
+        headers: reqHeaders,
         body:
           req.method === 'GET' || req.method === 'HEAD'
             ? undefined
