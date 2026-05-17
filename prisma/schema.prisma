@@ -17,20 +17,35 @@ datasource db {
 // ---------------------------------------------------------------------------
 
 model User {
-  id            String   @id @default(cuid())
-  email         String   @unique
-  emailVerified Boolean  @default(false)
-  name          String?
-  image         String?
-  settings      Json     @default("{}")
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id               String   @id @default(cuid())
+  email            String   @unique
+  emailVerified    Boolean  @default(false)
+  name             String?
+  image            String?
+  settings         Json     @default("{}")
+  twoFactorEnabled Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
-  sessions Session[]
-  accounts Account[]
-  projects Project[]
+  sessions   Session[]
+  accounts   Account[]
+  projects   Project[]
+  twoFactors TwoFactor[]
 
   @@map("users")
+}
+
+model TwoFactor {
+  id          String  @id @default(cuid())
+  userId      String
+  secret      String
+  backupCodes String
+  verified    Boolean @default(false)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("two_factors")
 }
 
 model Session {

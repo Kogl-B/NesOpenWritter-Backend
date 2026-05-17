@@ -1,5 +1,6 @@
 import { betterAuth } from 'better-auth';
 import { prismaAdapter } from 'better-auth/adapters/prisma';
+import { twoFactor } from 'better-auth/plugins';
 
 import { env } from './env.js';
 import { prisma } from './prisma.js';
@@ -56,4 +57,12 @@ export const auth = betterAuth({
       httpOnly: true,
     },
   },
+
+  plugins: [
+    twoFactor({
+      issuer: 'NesOpenWritter',
+      // backup codes: 10 single-use codes generated at enable time
+      backupCodeOptions: { amount: 10, length: 10 },
+    }),
+  ],
 });
