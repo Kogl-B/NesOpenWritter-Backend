@@ -21,6 +21,7 @@ model User {
   emailVerified Boolean  @default(false)
   name          String?
   image         String?
+  settings      Json     @default("{}")
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -94,13 +95,15 @@ model Project {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  owner      User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  characters Character[]
-  items      Item[]
-  locations  Location[]
-  events     TimelineEvent[]
-  chapters   Chapter[]
-  tags       Tag[]
+  owner       User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  characters  Character[]
+  items       Item[]
+  locations   Location[]
+  events      TimelineEvent[]
+  chapters    Chapter[]
+  tags        Tag[]
+  mapElements MapElement[]
+  mapDrawings MapDrawing[]
 
   @@index([ownerId])
   @@map("projects")
@@ -266,6 +269,7 @@ model Location {
   itemsHere   TimelineEvent[]
   itemsHosted Item[]              @relation("ItemCurrentLocation")
   positions   CharacterPosition[]
+  mapElements MapElement[]
 
   @@index([projectId])
   @@index([parentLocationId])
@@ -374,10 +378,12 @@ model Chapter {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  project  Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  parent   Chapter?       @relation("ChapterTree", fields: [parentId], references: [id], onDelete: Cascade)
-  children Chapter[]      @relation("ChapterTree")
-  event    TimelineEvent? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  project   Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent    Chapter?          @relation("ChapterTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children  Chapter[]         @relation("ChapterTree")
+  event     TimelineEvent?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  revisions ChapterRevision[]
+  mentions  SceneMention[]
 
   @@index([projectId])
   @@index([parentId])
@@ -415,4 +421,78 @@ model EntityTag {
   @@id([tagId, entityType, entityId])
   @@index([entityType, entityId])
   @@map("entity_tags")
+}
+
+// ---------------------------------------------------------------------------
+// Map elements & drawings (Этап 3)
+// ---------------------------------------------------------------------------
+
+model MapElement {
+  id          String   @id @default(cuid())
+  projectId   String
+  name        String
+  description String?
+  kind        String // marker | line | area
+  subkind     String?
+  locationId  String?
+  geometry    Json     @default("{}")
+  style       Json     @default("{}")
+  lodMin      Int      @default(0)
+  lodMax      Int      @default(4)
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project  Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  location Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([locationId])
+  @@map("map_elements")
+}
+
+model MapDrawing {
+  id        String   @id @default(cuid())
+  projectId String
+  name      String
+  layer     String   @default("default")
+  payload   Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("map_drawings")
+}
+
+// ---------------------------------------------------------------------------
+// Chapter revisions & scene mentions (Этап 4)
+// ---------------------------------------------------------------------------
+
+model ChapterRevision {
+  id        String   @id @default(cuid())
+  chapterId String
+  label     String?
+  content   Json     @default("{}")
+  wordCount Int      @default(0)
+  createdAt DateTime @default(now())
+
+  chapter Chapter @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  @@index([chapterId])
+  @@map("chapter_revisions")
+}
+
+model SceneMention {
+  sceneId    String
+  entityType String
+  entityId   String
+  count      Int    @default(1)
+
+  scene Chapter @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+
+  @@id([sceneId, entityType, entityId])
+  @@index([entityType, entityId])
+  @@map("scene_mentions")
 }

@@ -17,8 +17,15 @@ import { locationRoutes } from './routes/locations.js';
 import { eventRoutes } from './routes/events.js';
 import { chapterRoutes } from './routes/chapters.js';
 import { tagRoutes } from './routes/tags.js';
+import { mapRoutes } from './routes/maps.js';
+import { uploadRoutes } from './routes/uploads.js';
+import { searchRoutes } from './routes/search.js';
+import { logRoutes } from './routes/logs.js';
+import { initSentry, captureError } from './lib/sentry.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
+  initSentry();
+
   const app = Fastify({
     logger: loggerConfig,
     disableRequestLogging: false,
@@ -47,6 +54,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       return reply.status(err.statusCode).send({ error: err.message });
     }
     app.log.error({ err }, 'unhandled error');
+    captureError(err);
     return reply.status(500).send({ error: 'Internal Server Error' });
   });
 
@@ -61,6 +69,10 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(eventRoutes);
   await app.register(chapterRoutes);
   await app.register(tagRoutes);
+  await app.register(mapRoutes);
+  await app.register(uploadRoutes);
+  await app.register(searchRoutes);
+  await app.register(logRoutes);
 
   return app;
 }

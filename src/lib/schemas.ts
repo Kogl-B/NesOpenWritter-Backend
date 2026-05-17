@@ -183,7 +183,7 @@ export const chapterUpdateSchema = chapterCreateSchema.partial();
 
 // ----- Tag ------------------------------------------------------------------
 
-const taggableEntityTypeEnum = z.enum([
+export const taggableEntityTypeEnum = z.enum([
   'character',
   'item',
   'location',
@@ -206,6 +206,118 @@ export const tagUpdateSchema = tagCreateSchema.partial();
 export const tagAssignSchema = z.object({
   entityType: taggableEntityTypeEnum,
   entityId: z.string().min(1),
+});
+
+// ----- MapElement -----------------------------------------------------------
+
+const markerGeom = z.object({ x: z.number(), y: z.number() });
+const pointsGeom = z.object({
+  points: z.array(z.tuple([z.number(), z.number()])).min(1),
+});
+const geometrySchema = z.union([markerGeom, pointsGeom]);
+
+const mapElementKindEnum = z.enum(['marker', 'line', 'area']);
+
+export const mapElementCreateSchema = z.object({
+  name: z.string().min(1).max(200),
+  description: nullableString,
+  kind: mapElementKindEnum,
+  subkind: nullableString,
+  locationId: nullableId,
+  geometry: geometrySchema,
+  style: jsonObject.optional(),
+  lodMin: z.number().int().min(0).max(10).optional(),
+  lodMax: z.number().int().min(0).max(10).optional(),
+  metadata: jsonObject.optional(),
+});
+
+export const mapElementUpdateSchema = mapElementCreateSchema.partial();
+
+// ----- MapDrawing -----------------------------------------------------------
+
+export const mapDrawingCreateSchema = z.object({
+  name: z.string().min(1).max(200),
+  layer: z.string().max(100).optional(),
+  payload: jsonObject.optional(),
+});
+
+export const mapDrawingUpdateSchema = mapDrawingCreateSchema.partial();
+
+// ----- R2 presigned upload --------------------------------------------------
+
+export const presignUploadSchema = z.object({
+  filename: z.string().min(1).max(255),
+  contentType: z.string().min(1).max(100),
+  kind: z.enum(['portrait', 'item', 'map', 'other']).default('other'),
+  sizeBytes: z.number().int().positive().max(50 * 1024 * 1024).optional(),
+});
+
+// ----- Chapter content / revisions / mentions (Этап 4) ----------------------
+
+export const chapterContentSchema = z.object({
+  content: jsonObject,
+  wordCount: z.number().int().min(0).optional(),
+});
+
+export const chapterReorderItemSchema = z.object({
+  id: z.string().min(1),
+  parentId: nullableId,
+  orderIndex: z.number().int(),
+});
+
+export const chapterReorderSchema = z.object({
+  items: z.array(chapterReorderItemSchema).min(1),
+});
+
+const sceneMentionInputSchema = z.object({
+  entityType: taggableEntityTypeEnum,
+  entityId: z.string().min(1),
+  count: z.number().int().positive().optional(),
+});
+
+export const sceneMentionsReplaceSchema = z.object({
+  mentions: z.array(sceneMentionInputSchema),
+});
+
+export const chapterRevisionCreateSchema = z.object({
+  label: z.string().max(200).nullish(),
+});
+
+// ----- User settings (Этап 6) -----------------------------------------------
+
+export const userSettingsUpdateSchema = z.object({
+  settings: jsonObject,
+});
+
+// ----- Search (Этап 6) ------------------------------------------------------
+
+export const searchQuerySchema = z.object({
+  q: z.string().min(1).max(200),
+  types: z
+    .string()
+    .optional()
+    .transform((v) =>
+      v
+        ? v
+            .split(',')
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0)
+        : undefined,
+    ),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+// ----- Frontend logs (Этап 6) -----------------------------------------------
+
+const logEntrySchema = z.object({
+  level: z.enum(['error', 'warn', 'info', 'debug']),
+  message: z.string().max(2000),
+  timestamp: z.string().optional(),
+  context: jsonObject.optional(),
+});
+
+export const logBatchSchema = z.object({
+  entries: z.array(logEntrySchema).min(1).max(100),
 });
 
 // ----- export types --------------------------------------------------------

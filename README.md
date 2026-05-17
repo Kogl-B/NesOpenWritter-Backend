@@ -7,6 +7,10 @@ API-сервис для OpenWritter. Стек: **Fastify 5 + Prisma 5 + PostgreS
 - **Этап 0** — каркас, `/health`, Docker, Railway-конфиг
 - **Этап 1** — auth (email+password, Google OAuth), Project + Character CRUD
 - **Этап 2** — Item, Location, TimelineEvent, Chapter, Tag + связи (relations, genealogy, event-character, event-item, character-positions, polymorphic tag-links)
+- **Этап 3** — Cloudflare R2 presigned-upload, MapElement (marker/line/area + LOD), MapDrawing (heavy JSON + pagination)
+- **Этап 4** — Chapter content autosave PATCH, scene mentions (replace + reverse-lookup), chapters reorder (batch transaction), revisions (snapshot/restore)
+- **Этап 6** — глобальный поиск (по character/item/location/event/chapter/tag), user settings (`Json`), frontend logs endpoint (→ pino), Sentry (опционально через `SENTRY_DSN`)
+- **Этап 5** пропущен — это фронтовая работа (PWA + responsive, бэк не касается)
 
 ## Структура
 
@@ -84,6 +88,21 @@ backend/
 | `POST` | `/api/projects/:projectId/tags/:tagId/assign` | да | привязать тег к entity (character/item/location/event/chapter/scene) |
 | `DELETE` | `/api/projects/:projectId/tags/:tagId/assign/:entityType/:entityId` | да | отвязать |
 | `GET` | `/api/projects/:projectId/tag-links/:entityType/:entityId` | да | все теги entity (с join на tag) |
+| `GET\|POST` | `/api/projects/:projectId/map-elements` | да | marker/line/area, `?lod=N` фильтр |
+| `GET\|PATCH\|DELETE` | `/api/projects/:projectId/map-elements/:elementId` | да | |
+| `GET\|POST` | `/api/projects/:projectId/map-drawings` | да | summary-list, `?page=&pageSize=&layer=` |
+| `GET\|PATCH\|DELETE` | `/api/projects/:projectId/map-drawings/:drawingId` | да | full payload по id |
+| `POST` | `/api/projects/:projectId/uploads/presign` | да | presigned PUT URL для R2 (10 min TTL); 503 без R2-cred |
+| `PATCH` | `/api/projects/:projectId/chapters/:chapterId/content` | да | autosave: только content + wordCount |
+| `POST` | `/api/projects/:projectId/chapters/reorder` | да | batch: `[{id,parentId,orderIndex}]` в одной transaction |
+| `GET\|PUT` | `/api/projects/:projectId/chapters/:chapterId/mentions` | да | scene mentions: PUT replace |
+| `GET` | `/api/projects/:projectId/scene-mentions/:entityType/:entityId` | да | reverse-lookup (где упоминается) |
+| `GET\|POST` | `/api/projects/:projectId/chapters/:chapterId/revisions` | да | список ревизий / snapshot текущего content |
+| `GET\|DELETE` | `.../revisions/:revisionId` | да | |
+| `POST` | `.../revisions/:revisionId/restore` | да | вернуть content из ревизии |
+| `GET` | `/api/projects/:projectId/search?q=&types=&limit=` | да | глобальный ILIKE-поиск по всем сущностям |
+| `PATCH` | `/api/me/settings` | да | user settings (JSON) |
+| `POST` | `/api/projects/:projectId/logs` | да | batch frontend logs → pino |
 
 Все защищённые роуты возвращают **401** без валидного cookie. Изоляция проверяется по `ownerId` (для проектов) либо через `assertProjectOwnership` (для всех подресурсов) — другой пользователь видит **404** для чужих ресурсов. Cross-project references (например, link `eventId` из чужого проекта к character) возвращают **400**.
 

@@ -19,6 +19,13 @@ const envSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
 
+  SENTRY_DSN: z
+    .string()
+    .url()
+    .or(z.literal(''))
+    .optional()
+    .transform((v) => (v === '' ? undefined : v)),
+
   R2_ACCOUNT_ID: z.string().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
