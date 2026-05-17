@@ -54,10 +54,11 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
     autoSignIn: true,
-    // Soft email verification: account is usable immediately, but unverified
-    // users can be visually marked / blocked from specific features in UI.
-    // Switch to true to hard-block sign-in until verified.
-    requireEmailVerification: false,
+    // Hard email verification: sign-up returns no session until the user
+    // clicks the verification link in the email. Sign-in on an unverified
+    // account returns EMAIL_NOT_VERIFIED (the frontend must catch this and
+    // surface a "check your inbox / resend" UI).
+    requireEmailVerification: true,
     minPasswordLength: 8,
     sendResetPassword: async ({ user, url }) => {
       // Better-Auth builds url as <baseURL>/reset-password?token=...
