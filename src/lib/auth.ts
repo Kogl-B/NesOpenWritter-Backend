@@ -17,12 +17,16 @@ const isProd = env.NODE_ENV === 'production';
 /**
  * Better-Auth builds links pointing at the backend (`/api/auth/...`). We
  * want the user to land on the *frontend* after the token is checked, so
- * we append `callbackURL=<frontend page>` to the link. Better-Auth reads
- * it and redirects there after marking the token as used.
+ * we override `callbackURL` in the link. Better-Auth always adds its own
+ * default callbackURL (encoded "/") to the verify-email URL, so we must
+ * REPLACE that param rather than appending, otherwise the query string
+ * has two `callbackURL=` entries and gets parsed as an array, failing
+ * Better-Auth's zod validation with `expected string, received array`.
  */
-function appendCallbackUrl(authUrl: string, callbackPage: string): string {
-  const separator = authUrl.includes('?') ? '&' : '?';
-  return `${authUrl}${separator}callbackURL=${encodeURIComponent(callbackPage)}`;
+function withCallbackUrl(authUrl: string, callbackPage: string): string {
+  const url = new URL(authUrl);
+  url.searchParams.set('callbackURL', callbackPage);
+  return url.toString();
 }
 
 // trustedOrigins: every Vercel/custom domain (from CORS_ORIGIN) plus the
@@ -61,12 +65,7 @@ export const auth = betterAuth({
     requireEmailVerification: true,
     minPasswordLength: 8,
     sendResetPassword: async ({ user, url }) => {
-      // Better-Auth builds url as <baseURL>/reset-password?token=...
-      // Better-Auth's default points at the backend; we want the *frontend*
-      // page to handle it. Redirect via the verify-email callbackURL trick:
-      // append &callbackURL=<frontend>/reset-password so after token check
-      // the user lands on the frontend with the token in URL.
-      const finalUrl = appendCallbackUrl(url, `${env.FRONTEND_URL}/reset-password`);
+      const finalUrl = withCallbackUrl(url, `${env.FRONTEND_URL}/reset-password`);
       await sendPasswordResetEmail({ to: user.email, resetUrl: finalUrl });
     },
   },
@@ -75,7 +74,7 @@ export const auth = betterAuth({
     sendOnSignUp: true,
     autoSignInAfterVerification: true,
     sendVerificationEmail: async ({ user, url }) => {
-      const finalUrl = appendCallbackUrl(url, `${env.FRONTEND_URL}/email-verified`);
+      const finalUrl = withCallbackUrl(url, `${env.FRONTEND_URL}/email-verified`);
       await sendVerificationEmail({ to: user.email, verifyUrl: finalUrl });
     },
   },
