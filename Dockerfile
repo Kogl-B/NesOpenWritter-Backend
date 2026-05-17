@@ -22,6 +22,7 @@ RUN pnpm prune --prod
 
 # ---- runtime ----------------------------------------------------------------
 FROM node:22-alpine AS runtime
+RUN apk add --no-cache openssl
 WORKDIR /app
 ENV NODE_ENV=production
 
@@ -31,4 +32,5 @@ COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/package.json ./package.json
 
 EXPOSE 8080
-CMD ["node", "dist/server.js"]
+# Use node_modules/.bin/prisma directly — pnpm is not available in runtime image.
+CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node dist/server.js"]
