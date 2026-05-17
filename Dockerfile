@@ -32,5 +32,4 @@ COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/package.json ./package.json
 
 EXPOSE 8080
-# Use node_modules/.bin/prisma directly — pnpm is not available in runtime image.
-CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node dist/server.js"]
+CMD ["node", "dist/server.js"]
