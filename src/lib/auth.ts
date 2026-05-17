@@ -4,8 +4,26 @@ import { twoFactor } from 'better-auth/plugins';
 
 import { env } from './env.js';
 import { prisma } from './prisma.js';
+import {
+  sendPasswordResetEmail,
+  sendTwoFactorDisabledEmail,
+  sendTwoFactorEnabledEmail,
+  sendVerificationEmail,
+} from './email.js';
+import { logger } from './logger.js';
 
 const isProd = env.NODE_ENV === 'production';
+
+/**
+ * Better-Auth builds links pointing at the backend (`/api/auth/...`). We
+ * want the user to land on the *frontend* after the token is checked, so
+ * we append `callbackURL=<frontend page>` to the link. Better-Auth reads
+ * it and redirects there after marking the token as used.
+ */
+function appendCallbackUrl(authUrl: string, callbackPage: string): string {
+  const separator = authUrl.includes('?') ? '&' : '?';
+  return `${authUrl}${separator}callbackURL=${encodeURIComponent(callbackPage)}`;
+}
 
 // trustedOrigins: every Vercel/custom domain (from CORS_ORIGIN) plus the
 // backend's own URL — proxy setups sometimes pass Origin as the backend
@@ -36,8 +54,29 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
     autoSignIn: true,
+    // Soft email verification: account is usable immediately, but unverified
+    // users can be visually marked / blocked from specific features in UI.
+    // Switch to true to hard-block sign-in until verified.
     requireEmailVerification: false,
     minPasswordLength: 8,
+    sendResetPassword: async ({ user, url }) => {
+      // Better-Auth builds url as <baseURL>/reset-password?token=...
+      // Better-Auth's default points at the backend; we want the *frontend*
+      // page to handle it. Redirect via the verify-email callbackURL trick:
+      // append &callbackURL=<frontend>/reset-password so after token check
+      // the user lands on the frontend with the token in URL.
+      const finalUrl = appendCallbackUrl(url, `${env.FRONTEND_URL}/reset-password`);
+      await sendPasswordResetEmail({ to: user.email, resetUrl: finalUrl });
+    },
+  },
+
+  emailVerification: {
+    sendOnSignUp: true,
+    autoSignInAfterVerification: true,
+    sendVerificationEmail: async ({ user, url }) => {
+      const finalUrl = appendCallbackUrl(url, `${env.FRONTEND_URL}/email-verified`);
+      await sendVerificationEmail({ to: user.email, verifyUrl: finalUrl });
+    },
   },
 
   ...(socialProviders && { socialProviders }),
@@ -65,4 +104,41 @@ export const auth = betterAuth({
       backupCodeOptions: { amount: 10, length: 10 },
     }),
   ],
+
+  databaseHooks: {
+    user: {
+      update: {
+        before: async (data, ctx) => {
+          // Stash the *previous* twoFactorEnabled on ctx so the `after`
+          // hook can detect a real transition rather than firing on every
+          // user update (name change, etc).
+          if (ctx && (data as { twoFactorEnabled?: unknown }).twoFactorEnabled !== undefined) {
+            const userId = ctx.context?.session?.user?.id;
+            if (userId) {
+              const prev = await prisma.user.findUnique({
+                where: { id: userId },
+                select: { twoFactorEnabled: true },
+              });
+              (ctx as unknown as { _prev2FA?: boolean })._prev2FA = prev?.twoFactorEnabled ?? false;
+            }
+          }
+        },
+        after: async (user, ctx) => {
+          const prev = (ctx as unknown as { _prev2FA?: boolean })?._prev2FA;
+          if (prev === undefined) return;
+          if (typeof user.twoFactorEnabled !== 'boolean' || !user.email) return;
+          if (user.twoFactorEnabled === prev) return; // no real transition
+          try {
+            if (user.twoFactorEnabled) {
+              await sendTwoFactorEnabledEmail({ to: user.email });
+            } else {
+              await sendTwoFactorDisabledEmail({ to: user.email });
+            }
+          } catch (err) {
+            logger.error({ err, userId: user.id }, '2FA notification email failed');
+          }
+        },
+      },
+    },
+  },
 });

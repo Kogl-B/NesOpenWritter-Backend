@@ -26,6 +26,16 @@ const envSchema = z.object({
     .optional()
     .transform((v) => (v === '' ? undefined : v)),
 
+  // Resend (transactional email). Without RESEND_API_KEY the email module
+  // logs intent and returns silently — Better-Auth handlers won't crash if
+  // email isn't configured yet.
+  RESEND_API_KEY: z.string().optional(),
+  EMAIL_FROM: z.string().default('onboarding@resend.dev'),
+
+  // Public frontend URL — used to build links in emails (verify, reset).
+  // In dev set to http://localhost:5173; on Railway set to Vercel domain.
+  FRONTEND_URL: z.string().url().default('http://localhost:5173'),
+
   R2_ACCOUNT_ID: z.string().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
