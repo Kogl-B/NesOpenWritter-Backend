@@ -5,7 +5,16 @@ import { env } from './env.js';
 import { prisma } from './prisma.js';
 
 const isProd = env.NODE_ENV === 'production';
-const trustedOrigins = env.CORS_ORIGIN.split(',').map((o) => o.trim());
+
+// trustedOrigins: every Vercel/custom domain (from CORS_ORIGIN) plus the
+// backend's own URL — proxy setups sometimes pass Origin as the backend
+// host, and same-origin checks from server-side rendering need it too.
+const trustedOrigins = Array.from(
+  new Set([
+    ...env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean),
+    env.BETTER_AUTH_URL,
+  ]),
+);
 
 const socialProviders =
   env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET

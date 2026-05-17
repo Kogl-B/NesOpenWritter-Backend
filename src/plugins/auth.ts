@@ -27,6 +27,20 @@ function toWebHeaders(nodeHeaders: Record<string, string | string[] | undefined>
       headers.set(key, value);
     }
   }
+
+  // Vercel rewrite (rewrites from `nes-open-writter.vercel.app/api/*` to
+  // Railway) strips the Origin header. Better-Auth requires Origin for CSRF
+  // protection on state-changing endpoints (sign-out, change-password, etc).
+  // Reconstruct Origin from X-Forwarded-* headers that Vercel adds. These
+  // headers are set by the trusted proxy, not by user input, so it's safe.
+  if (!headers.has('origin')) {
+    const fwdHost = headers.get('x-forwarded-host');
+    const fwdProto = headers.get('x-forwarded-proto') ?? 'https';
+    if (fwdHost) {
+      headers.set('origin', `${fwdProto}://${fwdHost}`);
+    }
+  }
+
   return headers;
 }
 
