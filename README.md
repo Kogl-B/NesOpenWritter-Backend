@@ -10,7 +10,7 @@ API-сервис для OpenWritter. Стек: **Fastify 5 + Prisma 5 + PostgreS
 - **Этап 3** — Cloudflare R2 presigned-upload, MapElement (marker/line/area + LOD), MapDrawing (heavy JSON + pagination)
 - **Этап 4** — Chapter content autosave PATCH, scene mentions (replace + reverse-lookup), chapters reorder (batch transaction), revisions (snapshot/restore)
 - **Этап 6** — глобальный поиск (по character/item/location/event/chapter/tag), user settings (`Json`), frontend logs endpoint (→ pino), Sentry (опционально через `SENTRY_DSN`)
-- **Этап 5** пропущен — это фронтовая работа (PWA + responsive, бэк не касается)
+- **Этап 5** закрыт на фронте (PWA-иконки, manifest, mobile responsive) — бэк не касается
 
 ## Структура
 
@@ -85,7 +85,8 @@ backend/
 | `GET\|PATCH\|DELETE` | `/api/projects/:projectId/chapters/:chapterId` | да | |
 | `GET\|POST` | `/api/projects/:projectId/tags` | да | tags (uniq name на проект) |
 | `PATCH\|DELETE` | `/api/projects/:projectId/tags/:tagId` | да | |
-| `POST` | `/api/projects/:projectId/tags/:tagId/assign` | да | привязать тег к entity (character/item/location/event/chapter/scene) |
+| `POST` | `/api/projects/:projectId/tags/:tagId/assign` | да | привязать тег к entity (character/item/location/event/chapter/scene) — entityType/entityId в теле |
+| `POST` | `/api/projects/:projectId/tags/:tagId/assign/:entityType/:entityId` | да | то же параметрами пути (контракт фронтенда) |
 | `DELETE` | `/api/projects/:projectId/tags/:tagId/assign/:entityType/:entityId` | да | отвязать |
 | `GET` | `/api/projects/:projectId/tag-links/:entityType/:entityId` | да | все теги entity (с join на tag) |
 | `GET\|POST` | `/api/projects/:projectId/map-elements` | да | marker/line/area, `?lod=N` фильтр |
