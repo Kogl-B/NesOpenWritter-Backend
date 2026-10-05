@@ -22,6 +22,7 @@ import { uploadRoutes } from './routes/uploads.js';
 import { searchRoutes } from './routes/search.js';
 import { logRoutes } from './routes/logs.js';
 import { adminRoutes } from './routes/admin.js';
+import { snapshotRoutes } from './routes/snapshots.js';
 import { initSentry, captureError } from './lib/sentry.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -75,6 +76,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(searchRoutes);
   await app.register(logRoutes);
   await app.register(adminRoutes);
+  await app.register(snapshotRoutes);
 
   return app;
 }

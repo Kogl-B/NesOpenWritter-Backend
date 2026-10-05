@@ -120,6 +120,7 @@ model Project {
   tags        Tag[]
   mapElements MapElement[]
   mapDrawings MapDrawing[]
+  snapshots   WorldSnapshot[]
 
   @@index([ownerId])
   @@map("projects")
@@ -297,7 +298,8 @@ model Location {
 // ---------------------------------------------------------------------------
 
 model TimelineEvent {
-  id              String   @id @default(cuid())
+  snapshots       WorldSnapshot[]
+  id              String          @id @default(cuid())
   projectId       String
   name            String
   summary         String?
@@ -308,10 +310,10 @@ model TimelineEvent {
   locationId      String?
   color           String?
   icon            String?
-  importance      Int      @default(3)
-  metadata        Json     @default("{}")
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  importance      Int             @default(3)
+  metadata        Json            @default("{}")
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
 
   project    Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
   location   Location?           @relation(fields: [locationId], references: [id], onDelete: SetNull)
@@ -511,4 +513,23 @@ model SceneMention {
   @@id([sceneId, entityType, entityId])
   @@index([entityType, entityId])
   @@map("scene_mentions")
+}
+
+// v1.1 — Снапшоты состояния мира
+model WorldSnapshot {
+  id          String   @id @default(cuid())
+  projectId   String
+  eventId     String?
+  name        String
+  description String?
+  state       Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  event   TimelineEvent? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([eventId])
+  @@map("world_snapshots")
 }
