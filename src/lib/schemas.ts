@@ -9,7 +9,7 @@ const nullableId = z.string().min(1).nullish();
 // ----- Project --------------------------------------------------------------
 
 export const projectCreateSchema = z.object({
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
   description: z.string().max(2000).optional(),
   settings: jsonObject.optional(),
 });
@@ -21,7 +21,7 @@ export const projectUpdateSchema = projectCreateSchema.partial();
 const characterStatusEnum = z.enum(['alive', 'dead', 'unknown', 'missing']);
 
 export const characterCreateSchema = z.object({
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
   shortName: z.string().max(100).nullish(),
   portraitPath: z.string().max(500).nullish(),
   summary: z.string().max(2000).nullish(),
@@ -64,7 +64,7 @@ export const genealogyCreateSchema = z.object({
 // ----- Item -----------------------------------------------------------------
 
 export const itemCreateSchema = z.object({
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
   shortName: nullableString,
   imagePath: nullableString,
   category: z.string().max(50).optional(),
@@ -93,7 +93,7 @@ export const itemTimelinePointUpdateSchema = itemTimelinePointCreateSchema.parti
 // ----- Location -------------------------------------------------------------
 
 export const locationCreateSchema = z.object({
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
   shortName: nullableString,
   kind: z.string().max(50).optional(),
   parentLocationId: nullableId,
@@ -109,7 +109,7 @@ export const locationUpdateSchema = locationCreateSchema.partial();
 // ----- TimelineEvent --------------------------------------------------------
 
 export const eventCreateSchema = z.object({
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
   summary: nullableString,
   description: nullableString,
   at: z.string().min(1).max(100),
@@ -169,7 +169,7 @@ const chapterKindEnum = z.enum(['chapter', 'scene']);
 export const chapterCreateSchema = z.object({
   parentId: nullableId,
   kind: chapterKindEnum,
-  title: z.string().min(1).max(300),
+  title: z.string().trim().min(1).max(300),
   summary: nullableString,
   content: jsonObject.optional(),
   orderIndex: z.number().int().optional(),
@@ -193,7 +193,7 @@ export const taggableEntityTypeEnum = z.enum([
 ]);
 
 export const tagCreateSchema = z.object({
-  name: z.string().min(1).max(100),
+  name: z.string().trim().min(1).max(100),
   color: z
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/)
@@ -219,7 +219,7 @@ const geometrySchema = z.union([markerGeom, pointsGeom]);
 const mapElementKindEnum = z.enum(['marker', 'line', 'area']);
 
 export const mapElementCreateSchema = z.object({
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
   description: nullableString,
   kind: mapElementKindEnum,
   subkind: nullableString,
@@ -236,7 +236,7 @@ export const mapElementUpdateSchema = mapElementCreateSchema.partial();
 // ----- MapDrawing -----------------------------------------------------------
 
 export const mapDrawingCreateSchema = z.object({
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
   layer: z.string().max(100).optional(),
   payload: jsonObject.optional(),
 });
@@ -246,7 +246,7 @@ export const mapDrawingUpdateSchema = mapDrawingCreateSchema.partial();
 // ----- R2 presigned upload --------------------------------------------------
 
 export const presignUploadSchema = z.object({
-  filename: z.string().min(1).max(255),
+  filename: z.string().trim().min(1).max(255),
   contentType: z.string().min(1).max(100),
   kind: z.enum(['portrait', 'item', 'map', 'other']).default('other'),
   sizeBytes: z.number().int().positive().max(50 * 1024 * 1024).optional(),
