@@ -17,15 +17,16 @@ datasource db {
 // ---------------------------------------------------------------------------
 
 model User {
-  id               String   @id @default(cuid())
-  email            String   @unique
-  emailVerified    Boolean  @default(false)
+  collaborations   ProjectCollaborator[]
+  id               String                @id @default(cuid())
+  email            String                @unique
+  emailVerified    Boolean               @default(false)
   name             String?
   image            String?
-  settings         Json     @default("{}")
-  twoFactorEnabled Boolean  @default(false)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  settings         Json                  @default("{}")
+  twoFactorEnabled Boolean               @default(false)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
 
   sessions   Session[]
   accounts   Account[]
@@ -111,20 +112,27 @@ model Project {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  owner       User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  characters  Character[]
-  items       Item[]
-  locations   Location[]
-  events      TimelineEvent[]
-  chapters    Chapter[]
-  tags        Tag[]
-  mapElements MapElement[]
-  mapDrawings MapDrawing[]
-  snapshots   WorldSnapshot[]
-  WikiPage    WikiPage[]
-  Currency    Currency[]
-  Resource    Resource[]
-  TradeRoute  TradeRoute[]
+  owner               User                  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  characters          Character[]
+  items               Item[]
+  locations           Location[]
+  events              TimelineEvent[]
+  chapters            Chapter[]
+  tags                Tag[]
+  mapElements         MapElement[]
+  mapDrawings         MapDrawing[]
+  snapshots           WorldSnapshot[]
+  WikiPage            WikiPage[]
+  Currency            Currency[]
+  Resource            Resource[]
+  TradeRoute          TradeRoute[]
+  KnowledgeEntry      KnowledgeEntry[]
+  Calendar            Calendar[]
+  TraitInheritance    TraitInheritance[]
+  InvestigationPin    InvestigationPin[]
+  InvestigationThread InvestigationThread[]
+  ExportJob           ExportJob[]
+  ProjectCollaborator ProjectCollaborator[]
 
   @@index([ownerId])
   @@map("projects")
@@ -135,7 +143,8 @@ model Project {
 // ---------------------------------------------------------------------------
 
 model Character {
-  id           String   @id @default(cuid())
+  knowledge    KnowledgeEntry[]
+  id           String           @id @default(cuid())
   projectId    String
   name         String
   shortName    String?
@@ -143,14 +152,14 @@ model Character {
   summary      String?
   biography    String?
   faction      String?
-  status       String   @default("alive")
+  status       String           @default("alive")
   dateOfBirth  String?
   dateOfDeath  String?
-  traits       String[] @default([])
-  abilities    String[] @default([])
-  metadata     Json     @default("{}")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  traits       String[]         @default([])
+  abilities    String[]         @default([])
+  metadata     Json             @default("{}")
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
@@ -321,12 +330,13 @@ model TimelineEvent {
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
-  project    Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  location   Location?           @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  characters EventCharacter[]
-  items      EventItem[]
-  positions  CharacterPosition[]
-  chapters   Chapter[]
+  project        Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  location       Location?           @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  characters     EventCharacter[]
+  items          EventItem[]
+  positions      CharacterPosition[]
+  chapters       Chapter[]
+  KnowledgeEntry KnowledgeEntry[]
 
   @@index([projectId])
   @@index([locationId])
@@ -617,4 +627,136 @@ model TradeRoute {
   toLocation   Location? @relation("tradeTo", fields: [toLocationId], references: [id], onDelete: SetNull)
 
   @@map("trade_routes")
+}
+
+// v1.4 — Туман войны (знания персонажа)
+model KnowledgeEntry {
+  id          String   @id @default(cuid())
+  projectId   String
+  characterId String
+  eventId     String? // на каком событие персонаж узнал
+  topic       String // "location:xyz", "character:abc", "secret:n"
+  known       Boolean  @default(true)
+  detail      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project   Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  character Character      @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  event     TimelineEvent? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@unique([characterId, topic])
+  @@index([projectId])
+  @@map("knowledge_entries")
+}
+
+// v1.5 — Календарь
+model Calendar {
+  id            String   @id @default(cuid())
+  projectId     String
+  name          String
+  isDefault     Boolean  @default(false)
+  monthsPerYear Int      @default(12)
+  daysPerMonth  Int      @default(30)
+  hoursPerDay   Int      @default(24)
+  moonCount     Int      @default(1)
+  epochName     String   @default("Epoch")
+  currentYear   Int      @default(1)
+  settings      Json     @default("{}") // фазы лун, затмения, праздники
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("calendars")
+}
+
+// v1.6 — Генеалогический симулятор
+model TraitInheritance {
+  id          String   @id @default(cuid())
+  projectId   String
+  name        String
+  type        String   @default("physical") // physical, mental, magical, skill
+  dominant    Boolean  @default(true) // доминантный или рецессивный
+  probability Float    @default(0.5) // вероятность наследования
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, name])
+  @@map("trait_inheritances")
+}
+
+// v1.7 — Доска расследований
+model InvestigationPin {
+  threadsFrom InvestigationThread[] @relation("threadFrom")
+  threadsTo   InvestigationThread[] @relation("threadTo")
+  id          String                @id @default(cuid())
+  projectId   String
+  boardId     String? // null = основная доска
+  x           Float                 @default(0)
+  y           Float                 @default(0)
+  label       String
+  entityType  String? // character/item/location/event
+  entityId    String?
+  note        String?
+  color       String                @default("#f7bd48")
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("investigation_pins")
+}
+
+model InvestigationThread {
+  id        String   @id @default(cuid())
+  projectId String
+  fromPinId String
+  toPinId   String
+  label     String?
+  createdAt DateTime @default(now())
+
+  project Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fromPin InvestigationPin @relation("threadFrom", fields: [fromPinId], references: [id], onDelete: Cascade)
+  toPin   InvestigationPin @relation("threadTo", fields: [toPinId], references: [id], onDelete: Cascade)
+
+  @@map("investigation_threads")
+}
+
+// v2.0 — Экспорт/импорт
+model ExportJob {
+  id        String   @id @default(cuid())
+  projectId String
+  format    String // json, markdown, epub
+  status    String   @default("pending") // pending, done, failed
+  resultUrl String?
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("export_jobs")
+}
+
+// v3.0 — Совместная работа
+model ProjectCollaborator {
+  id          String   @id @default(cuid())
+  projectId   String
+  userId      String
+  role        String   @default("editor") // viewer, editor, admin
+  invitedById String?
+  status      String   @default("active") // pending, active, revoked
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@map("project_collaborators")
 }
