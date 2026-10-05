@@ -180,6 +180,45 @@ export const tagRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  // Параметрический assign — контракт фронтенда (POST /assign/:entityType/:entityId).
+  // Раньше на этом пути был только DELETE, из-за чего attach с фронта получал 404
+  // и привязки тегов молча не сохранялись.
+  app.post<{ Params: EntityTagParam }>(
+    '/api/projects/:projectId/tags/:tagId/assign/:entityType/:entityId',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const tag = await prisma.tag.findFirst({
+        where: { id: req.params.tagId, projectId: req.params.projectId },
+        select: { id: true },
+      });
+      if (!tag) return reply.status(404).send({ error: 'Tag not found' });
+      const ok = await entityBelongsToProject(
+        req.params.entityType,
+        req.params.entityId,
+        req.params.projectId,
+      );
+      if (!ok) return reply.status(400).send({ error: 'Entity not in project' });
+      const link = await prisma.entityTag.upsert({
+        where: {
+          tagId_entityType_entityId: {
+            tagId: req.params.tagId,
+            entityType: req.params.entityType,
+            entityId: req.params.entityId,
+          },
+        },
+        update: {},
+        create: {
+          tagId: req.params.tagId,
+          entityType: req.params.entityType,
+          entityId: req.params.entityId,
+        },
+      });
+      return reply.status(201).send({ link });
+    },
+  );
+
   app.delete<{ Params: EntityTagParam }>(
     '/api/projects/:projectId/tags/:tagId/assign/:entityType/:entityId',
     async (req, reply) => {
