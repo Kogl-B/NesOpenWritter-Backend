@@ -13,6 +13,9 @@ const envSchema = z.object({
 
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
 
+  // email-лист админов (через запятую); пусто = админ-эндпоинты выключены
+  ADMIN_EMAILS: z.string().optional().default(''),
+
   BETTER_AUTH_SECRET: z.string().min(32),
   BETTER_AUTH_URL: z.string().url(),
 
