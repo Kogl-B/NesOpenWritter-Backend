@@ -1,7 +1,7 @@
 {
   "name": "nesopenwritter-backend",
   "private": true,
-  "version": "1.0.0",
+  "version": "3.0.0",
   "description": "OpenWritter API — Fastify + Prisma + PostgreSQL (Railway)",
   "type": "module",
   "packageManager": "pnpm@9.0.0",
