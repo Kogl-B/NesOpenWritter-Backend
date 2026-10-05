@@ -121,6 +121,7 @@ model Project {
   mapElements MapElement[]
   mapDrawings MapDrawing[]
   snapshots   WorldSnapshot[]
+  WikiPage    WikiPage[]
 
   @@index([ownerId])
   @@map("projects")
@@ -532,4 +533,25 @@ model WorldSnapshot {
   @@index([projectId])
   @@index([eventId])
   @@map("world_snapshots")
+}
+
+// v1.2 — Вики проекта
+model WikiPage {
+  id          String   @id @default(cuid())
+  projectId   String
+  slug        String
+  title       String
+  content     String   @db.Text
+  category    String? // например: «Лор», «Магия», «География», «История»
+  tags        String[] @default([])
+  links       Json     @default("[]") // [{ pageId, label }] — внутренние ссылки
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, slug])
+  @@index([projectId])
+  @@map("wiki_pages")
 }

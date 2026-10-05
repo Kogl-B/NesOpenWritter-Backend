@@ -23,6 +23,7 @@ import { searchRoutes } from './routes/search.js';
 import { logRoutes } from './routes/logs.js';
 import { adminRoutes } from './routes/admin.js';
 import { snapshotRoutes } from './routes/snapshots.js';
+import { wikiRoutes } from './routes/wiki.js';
 import { initSentry, captureError } from './lib/sentry.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -77,6 +78,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(logRoutes);
   await app.register(adminRoutes);
   await app.register(snapshotRoutes);
+  await app.register(wikiRoutes);
 
   return app;
 }
