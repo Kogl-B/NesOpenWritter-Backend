@@ -122,6 +122,9 @@ model Project {
   mapDrawings MapDrawing[]
   snapshots   WorldSnapshot[]
   WikiPage    WikiPage[]
+  Currency    Currency[]
+  Resource    Resource[]
+  TradeRoute  TradeRoute[]
 
   @@index([ownerId])
   @@map("projects")
@@ -265,19 +268,21 @@ model ItemTimelinePoint {
 // ---------------------------------------------------------------------------
 
 model Location {
-  id               String   @id @default(cuid())
+  tradeRoutesFrom  TradeRoute[] @relation("tradeFrom")
+  tradeRoutesTo    TradeRoute[] @relation("tradeTo")
+  id               String       @id @default(cuid())
   projectId        String
   name             String
   shortName        String?
-  kind             String   @default("place")
+  kind             String       @default("place")
   parentLocationId String?
-  lodLevel         Int      @default(0)
+  lodLevel         Int          @default(0)
   coordX           Float?
   coordY           Float?
   description      String?
-  metadata         Json     @default("{}")
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  metadata         Json         @default("{}")
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
 
   project        Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
   parentLocation Location?  @relation("LocationHierarchy", fields: [parentLocationId], references: [id], onDelete: SetNull)
@@ -554,4 +559,62 @@ model WikiPage {
   @@unique([projectId, slug])
   @@index([projectId])
   @@map("wiki_pages")
+}
+
+// v1.3 — Экономика
+model Currency {
+  id           String   @id @default(cuid())
+  projectId    String
+  name         String
+  code         String
+  symbol       String?
+  exchangeRate Json     @default("{}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  resources Resource[]
+
+  @@unique([projectId, code])
+  @@map("currencies")
+}
+
+model Resource {
+  id          String   @id @default(cuid())
+  projectId   String
+  name        String
+  category    String
+  rarity      String   @default("common")
+  description String?
+  unit        String   @default("unit")
+  basePrice   Float?
+  currencyId  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project  Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  currency Currency? @relation(fields: [currencyId], references: [id], onDelete: SetNull)
+
+  @@unique([projectId, name])
+  @@map("resources")
+}
+
+model TradeRoute {
+  id             String   @id @default(cuid())
+  projectId      String
+  name           String
+  fromLocationId String?
+  toLocationId   String?
+  distanceKm     Float?
+  travelDays     Int?
+  danger         String   @default("low")
+  description    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fromLocation Location? @relation("tradeFrom", fields: [fromLocationId], references: [id], onDelete: SetNull)
+  toLocation   Location? @relation("tradeTo", fields: [toLocationId], references: [id], onDelete: SetNull)
+
+  @@map("trade_routes")
 }
