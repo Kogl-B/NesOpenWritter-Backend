@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership } from '../lib/access.js';
+import { generateEpub, generateDocx, generatePdf } from '../lib/exporters.js';
 
 /**
  * v1.4-v3.0 — Дополнительные модули: знания, календарь, симулятор черт,
@@ -183,7 +184,7 @@ export async function featureRoutes(app: FastifyInstance) {
     '/api/projects/:projectId/export',
     async (req, reply) => {
       if (!(await checkProject(req, reply))) return;
-      const input = z.object({ format: z.enum(['json', 'markdown', 'txt']) }).parse(req.body);
+      const input = z.object({ format: z.enum(['json', 'markdown', 'txt', 'epub', 'docx', 'pdf']) }).parse(req.body);
       // Создаём job, сам экспорт синхронный (данные проекта)
       const [chars, items, locs, events, chapters, tags, maps] = await Promise.all([
         prisma.character.findMany({ where: { projectId: req.params.projectId } }),
@@ -220,6 +221,33 @@ export async function featureRoutes(app: FastifyInstance) {
         txt += '\n--- СОБЫТИЯ ---\n';
         for (const e of events) txt += e.name + ' (' + e.at + ')\n';
         return reply.type('text/plain').send(txt);
+      }
+      if (input.format === 'epub') {
+        const buf = generateEpub({
+          projectName: project?.name ?? 'Project',
+          chapters: chapters.map((c: { id: string; title: string; content: unknown; wordCount: number; kind: string }) => ({ id: c.id, title: c.title, content: c.content, wordCount: c.wordCount, kind: c.kind })),
+          characters: chars,
+          locations: locs,
+        });
+        return reply.type('application/epub+zip').send(buf);
+      }
+      if (input.format === 'docx') {
+        const buf = generateDocx({
+          projectName: project?.name ?? 'Project',
+          chapters: chapters.map((c: { id: string; title: string; content: unknown; wordCount: number; kind: string }) => ({ id: c.id, title: c.title, content: c.content, wordCount: c.wordCount, kind: c.kind })),
+          characters: chars,
+          locations: locs,
+        });
+        return reply.type('application/vnd.openxmlformats-officedocument.wordprocessingml.document').send(buf);
+      }
+      if (input.format === 'pdf') {
+        const buf = generatePdf({
+          projectName: project?.name ?? 'Project',
+          chapters: chapters.map((c: { id: string; title: string; content: unknown; wordCount: number; kind: string }) => ({ id: c.id, title: c.title, content: c.content, wordCount: c.wordCount, kind: c.kind })),
+          characters: chars,
+          locations: locs,
+        });
+        return reply.type('application/pdf').send(buf);
       }
       // markdown
       let md = `# ${project?.name ?? 'Project'}\n\n`;
