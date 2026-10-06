@@ -16,6 +16,9 @@ const envSchema = z.object({
   // email-лист админов (через запятую); пусто = админ-эндпоинты выключены
   ADMIN_EMAILS: z.string().optional().default(''),
 
+  // Отключение email-верификации (для прода без RESEND_API_KEY)
+  REQUIRE_EMAIL_VERIFICATION: z.string().optional().default('true'),
+
   BETTER_AUTH_SECRET: z.string().min(32),
   BETTER_AUTH_URL: z.string().url(),
 

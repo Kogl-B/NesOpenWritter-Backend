@@ -62,7 +62,7 @@ export const auth = betterAuth({
     // clicks the verification link in the email. Sign-in on an unverified
     // account returns EMAIL_NOT_VERIFIED (the frontend must catch this and
     // surface a "check your inbox / resend" UI).
-    requireEmailVerification: true,
+    requireEmailVerification: env.REQUIRE_EMAIL_VERIFICATION !== 'false',
     minPasswordLength: 8,
     sendResetPassword: async ({ user, url }) => {
       const finalUrl = withCallbackUrl(url, `${env.FRONTEND_URL}/reset-password`);
