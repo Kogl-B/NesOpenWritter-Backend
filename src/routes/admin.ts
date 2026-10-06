@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../lib/prisma.js';
 import { env } from '../lib/env.js';
+import { getMetrics, resetMetrics } from '../lib/metrics.js';
+import { getDbMetrics } from '../lib/prisma.js';
 
 /**
  * Админ-контур. Доступ — только для email из ADMIN_EMAILS (запятая-разделённый
@@ -30,5 +32,26 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
     ]);
     return { users, projects, activeSessions };
+  });
+
+  // === Performance metrics ===
+  app.get('/api/admin/metrics', async (req, reply) => {
+    app.requireAuth(req);
+    if (!isAdmin(req.user?.email)) {
+      return reply.status(403).send({ error: 'Admin access required' });
+    }
+    return {
+      ...getMetrics(),
+      db: getDbMetrics(),
+    };
+  });
+
+  app.post('/api/admin/metrics/reset', async (req, reply) => {
+    app.requireAuth(req);
+    if (!isAdmin(req.user?.email)) {
+      return reply.status(403).send({ error: 'Admin access required' });
+    }
+    resetMetrics();
+    return { status: 'reset' };
   });
 }

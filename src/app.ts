@@ -28,6 +28,7 @@ import { economyRoutes } from './routes/economy.js';
 import { featureRoutes } from './routes/features.js';
 import { wikiBookRoutes } from './routes/wikiBook.js';
 import { initSentry, captureError } from './lib/sentry.js';
+import { recordRequest, getDbStats } from './lib/metrics.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   initSentry();
@@ -37,6 +38,33 @@ export async function buildApp(): Promise<FastifyInstance> {
     disableRequestLogging: false,
     trustProxy: true,
   });
+
+  // --- Performance metrics middleware ---
+  app.addHook('onRequest', async (req) => {
+    (req as unknown as { _metricsStart: number })._metricsStart = performance.now();
+    (req as unknown as { _metricsId: string })._metricsId = `${req.id}-${Date.now()}`;
+  });
+
+  app.addHook('onResponse', async (req, reply) => {
+    const start = (req as unknown as { _metricsStart?: number })._metricsStart;
+    const metricsId = (req as unknown as { _metricsId?: string })._metricsId;
+    if (start == null) return;
+
+    const durationMs = Math.round((performance.now() - start) * 100) / 100;
+    const dbStats = metricsId ? getDbStats(metricsId) : { queries: 0, timeMs: 0 };
+
+    recordRequest({
+      route: req.routeOptions?.url ?? req.url.split('?')[0] ?? 'unknown',
+      method: req.method,
+      statusCode: reply.statusCode,
+      durationMs,
+      timestamp: Date.now(),
+      dbQueries: dbStats.queries,
+      dbTimeMs: dbStats.timeMs,
+    });
+  });
+
+  // DB query timing via Prisma $use middleware is in lib/prisma.ts
 
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(cors, {
