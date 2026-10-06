@@ -183,7 +183,7 @@ export async function featureRoutes(app: FastifyInstance) {
     '/api/projects/:projectId/export',
     async (req, reply) => {
       if (!(await checkProject(req, reply))) return;
-      const input = z.object({ format: z.enum(['json', 'markdown']) }).parse(req.body);
+      const input = z.object({ format: z.enum(['json', 'markdown', 'txt']) }).parse(req.body);
       // Создаём job, сам экспорт синхронный (данные проекта)
       const [chars, items, locs, events, chapters, tags, maps] = await Promise.all([
         prisma.character.findMany({ where: { projectId: req.params.projectId } }),
@@ -211,6 +211,15 @@ export async function featureRoutes(app: FastifyInstance) {
           mapElements: maps,
           exportedAt: new Date().toISOString(),
         };
+      }
+      if (input.format === 'txt') {
+        let txt = project?.name + '\n' + '='.repeat(project?.name.length ?? 7) + '\n\n';
+        for (const c of chars) txt += c.name + (c.faction ? ' (' + c.faction + ')' : '') + '\n';
+        txt += '\n--- ЛОКАЦИИ ---\n';
+        for (const l of locs) txt += l.name + ' (' + l.kind + ')\n';
+        txt += '\n--- СОБЫТИЯ ---\n';
+        for (const e of events) txt += e.name + ' (' + e.at + ')\n';
+        return reply.type('text/plain').send(txt);
       }
       // markdown
       let md = `# ${project?.name ?? 'Project'}\n\n`;
@@ -281,6 +290,29 @@ export async function featureRoutes(app: FastifyInstance) {
       } catch {
         return reply.status(404).send({ error: 'Collaborator not found' });
       }
+    },
+  );
+
+  // === Публичная ссылка (read-only) ===
+  app.get<{ Params: { projectId: string } }>(
+    '/api/public/:projectId/overview',
+    async (req, reply) => {
+      const project = await prisma.project.findUnique({
+        where: { id: req.params.projectId },
+        select: { name: true, description: true },
+      });
+      if (!project) return reply.status(404).send({ error: 'Not found' });
+      const [chars, locs] = await Promise.all([
+        prisma.character.findMany({
+          where: { projectId: req.params.projectId },
+          select: { name: true, faction: true, status: true },
+        }),
+        prisma.location.findMany({
+          where: { projectId: req.params.projectId },
+          select: { name: true, kind: true },
+        }),
+      ]);
+      return { project, characters: chars, locations: locs };
     },
   );
 }
