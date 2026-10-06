@@ -181,6 +181,24 @@ export const mapRoutes: FastifyPluginAsync = async (app) => {
     return { drawings, page, pageSize, total };
   });
 
+  // Batch endpoint: возвращает payloads для списка ids (решает N+1 на фронте)
+  app.post<{ Params: ProjectParam }>(
+    '/api/projects/:projectId/map-drawings/batch',
+    async (req, reply) => {
+      app.requireAuth(req);
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const ids = (req.body as { ids?: string[] })?.ids ?? [];
+      if (ids.length === 0) return { drawings: [] };
+      const drawings = await prisma.mapDrawing.findMany({
+        where: { projectId: req.params.projectId, id: { in: ids.slice(0, 100) } },
+        select: { id: true, payload: true },
+      });
+      return { drawings };
+    },
+  );
+
   app.post<{ Params: ProjectParam }>(
     '/api/projects/:projectId/map-drawings',
     async (req, reply) => {

@@ -31,6 +31,13 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
       const characters = await prisma.character.findMany({
         where: { projectId: req.params.projectId },
         orderBy: { updatedAt: 'desc' },
+        select: {
+          id: true, projectId: true, name: true, shortName: true,
+          faction: true, status: true, portraitPath: true, summary: true,
+          dateOfBirth: true, dateOfDeath: true,
+          traits: true, abilities: true,
+          createdAt: true, updatedAt: true,
+        },
       });
       return { characters };
     },

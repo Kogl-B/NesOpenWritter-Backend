@@ -34,6 +34,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       }
       const events = await prisma.timelineEvent.findMany({
         where: { projectId: req.params.projectId },
+        select: {
+          id: true, projectId: true, name: true, summary: true,
+          at: true, atNumeric: true, durationNumeric: true, importance: true,
+          icon: true, color: true, locationId: true,
+          createdAt: true, updatedAt: true,
+        },
         orderBy: [{ atNumeric: 'asc' }, { createdAt: 'asc' }],
       });
       return { events };

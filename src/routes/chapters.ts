@@ -29,6 +29,14 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       const chapters = await prisma.chapter.findMany({
         where: { projectId: req.params.projectId },
         orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],
+        select: {
+          id: true, projectId: true, title: true, kind: true,
+          parentId: true, orderIndex: true,
+          summary: true, wordCount: true,
+          eventId: true, locationId: true,
+          metadata: true,
+          createdAt: true, updatedAt: true,
+        },
       });
       return { chapters };
     },

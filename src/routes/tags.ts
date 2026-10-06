@@ -74,6 +74,10 @@ export const tagRoutes: FastifyPluginAsync = async (app) => {
       }
       const tags = await prisma.tag.findMany({
         where: { projectId: req.params.projectId },
+        select: {
+          id: true, projectId: true, name: true, color: true,
+          createdAt: true,
+        },
         orderBy: { name: 'asc' },
       });
       return { tags };

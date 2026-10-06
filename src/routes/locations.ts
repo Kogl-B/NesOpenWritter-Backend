@@ -20,6 +20,12 @@ export const locationRoutes: FastifyPluginAsync = async (app) => {
       }
       const locations = await prisma.location.findMany({
         where: { projectId: req.params.projectId },
+        select: {
+          id: true, projectId: true, name: true, kind: true,
+          parentLocationId: true, lodLevel: true,
+          coordX: true, coordY: true,
+          createdAt: true, updatedAt: true,
+        },
         orderBy: [{ lodLevel: 'asc' }, { name: 'asc' }],
       });
       return { locations };

@@ -26,6 +26,12 @@ export const itemRoutes: FastifyPluginAsync = async (app) => {
       }
       const items = await prisma.item.findMany({
         where: { projectId: req.params.projectId },
+        select: {
+          id: true, projectId: true, name: true, category: true, rarity: true,
+          currentOwnerId: true, currentLocationId: true,
+          summary: true,
+          createdAt: true, updatedAt: true,
+        },
         orderBy: { updatedAt: 'desc' },
       });
       return { items };
