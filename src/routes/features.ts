@@ -94,6 +94,7 @@ export async function featureRoutes(app: FastifyInstance) {
         epochName: z.string().trim().max(50).optional(),
         currentYear: z.number().int().optional(),
         isDefault: z.boolean().optional(),
+        settings: z.record(z.string(), z.unknown()).optional(),
       }).parse(req.body);
       if (input.isDefault) {
         // основной календарь в проекте может быть только один
@@ -103,9 +104,15 @@ export async function featureRoutes(app: FastifyInstance) {
         });
       }
       try {
+        const { settings, ...rest } = input;
         const calendar = await prisma.calendar.update({
           where: { id: req.params.calendarId },
-          data: input,
+          data: {
+            ...rest,
+            ...(settings !== undefined && {
+              settings: settings as unknown as import('@prisma/client').Prisma.InputJsonValue,
+            }),
+          },
         });
         return { calendar };
       } catch {

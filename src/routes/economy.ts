@@ -28,7 +28,13 @@ const tradeRouteSchema = z.object({
   travelDays: z.number().int().positive().optional().nullable(),
   danger: z.enum(['low', 'medium', 'high', 'extreme']).default('low'),
   description: z.string().max(2000).optional().nullable(),
-});
+}).refine(
+  (data) =>
+    !data.fromLocationId ||
+    !data.toLocationId ||
+    data.fromLocationId !== data.toLocationId,
+  { message: 'Откуда и куда должны различаться' },
+);
 
 /**
  * v1.3 — Экономика: валюты, ресурсы, торговые пути.

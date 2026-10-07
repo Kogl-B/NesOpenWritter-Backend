@@ -28,8 +28,17 @@ export const characterCreateSchema = z.object({
   biography: z.string().nullish(),
   faction: z.string().max(200).nullish(),
   status: characterStatusEnum.optional(),
-  dateOfBirth: z.string().max(50).nullish(),
-  dateOfDeath: z.string().max(50).nullish(),
+  // «год/эпоха» — свободный текст, но без мусора вроде «abc»
+  dateOfBirth: z
+    .string()
+    .max(50)
+    .refine((v) => /[0-9а-яёА-ЯЁ]/i.test(v), 'Дата рождения: используйте цифры или кириллицу')
+    .nullish(),
+  dateOfDeath: z
+    .string()
+    .max(50)
+    .refine((v) => /[0-9а-яёА-ЯЁ]/i.test(v), 'Дата смерти: используйте цифры или кириллицу')
+    .nullish(),
   traits: z.array(z.string()).optional(),
   abilities: z.array(z.string()).optional(),
   metadata: jsonObject.optional(),
