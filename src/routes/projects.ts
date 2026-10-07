@@ -10,8 +10,14 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get('/api/projects', async (req) => {
+    // собственные + проекты, куда пользователя пригласили коллаборатором
     const projects = await prisma.project.findMany({
-      where: { ownerId: req.user!.id },
+      where: {
+        OR: [
+          { ownerId: req.user!.id },
+          { collaborators: { some: { userId: req.user!.id, status: 'active' } } },
+        ],
+      },
       orderBy: { updatedAt: 'desc' },
     });
     return { projects };
@@ -19,6 +25,16 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
 
   app.post('/api/projects', async (req, reply) => {
     const input = projectCreateSchema.parse(req.body);
+    // Лимит Free-тарифа: до 3 проектов (env-перекрываем для тестов)
+    const freeLimit = Number(process.env.FREE_PROJECT_LIMIT ?? 3);
+    if (Number.isFinite(freeLimit) && freeLimit > 0) {
+      const owned = await prisma.project.count({ where: { ownerId: req.user!.id } });
+      if (owned >= freeLimit) {
+        return reply.status(403).send({
+          error: `Лимит бесплатного тарифа: до ${freeLimit} проектов. Удалите лишний проект или перейдите на Pro.`,
+        });
+      }
+    }
     const project = await prisma.project.create({
       data: {
         ownerId: req.user!.id,

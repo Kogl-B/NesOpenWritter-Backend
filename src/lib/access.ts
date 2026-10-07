@@ -28,8 +28,10 @@ export const toJson = (v: Record<string, unknown> | undefined): JsonValue =>
   (v ?? {}) as JsonValue;
 
 /**
- * Verify that `projectId` belongs to `userId`. Returns true if owned.
- * Used as a 404 boundary for all sub-resources.
+ * Verify that `userId` can access `projectId`: the owner OR an active
+ * collaborator (invited via the Collaborators panel). Used as a 404
+ * boundary for all sub-resources — this is what gives invited readers
+ * access to a shared project.
  */
 export async function assertProjectOwnership(
   projectId: string,
@@ -38,11 +40,17 @@ export async function assertProjectOwnership(
   const cached = getCachedOwnership(projectId, userId);
   if (cached !== undefined) return cached;
 
-  const project = await prisma.project.findFirst({
-    where: { id: projectId, ownerId: userId },
-    select: { id: true },
-  });
-  const result = project !== null;
+  const [own, collab] = await Promise.all([
+    prisma.project.findFirst({
+      where: { id: projectId, ownerId: userId },
+      select: { id: true },
+    }),
+    prisma.projectCollaborator.findFirst({
+      where: { projectId, userId, status: 'active' },
+      select: { id: true },
+    }),
+  ]);
+  const result = own !== null || collab !== null;
   setCachedOwnership(projectId, userId, result);
   return result;
 }
