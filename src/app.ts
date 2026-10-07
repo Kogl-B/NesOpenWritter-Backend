@@ -29,6 +29,7 @@ import { featureRoutes } from './routes/features.js';
 import { wikiBookRoutes } from './routes/wikiBook.js';
 import { initSentry, captureError } from './lib/sentry.js';
 import { recordRequest, getDbStats } from './lib/metrics.js';
+import { prisma } from './lib/prisma.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   initSentry();
@@ -93,6 +94,40 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   await app.register(authPlugin);
+
+  // RBAC (BUG-79): роль «Читатель» (viewer) — только чтение. Все изменяющие
+  // запросы внутри /api/projects/:projectId/* от viewer'а отклоняются.
+  const roleCache = new Map<string, { role: string; expires: number }>();
+  async function getProjectRole(projectId: string, userId: string): Promise<'owner' | 'admin' | 'editor' | 'viewer' | null> {
+    const key = `${projectId}:${userId}`;
+    const hit = roleCache.get(key);
+    if (hit && Date.now() < hit.expires) return hit.role as 'owner' | 'admin' | 'editor' | 'viewer' | null;
+    const [own, collab] = await Promise.all([
+      prisma.project.findFirst({ where: { id: projectId, ownerId: userId }, select: { id: true } }),
+      prisma.projectCollaborator.findFirst({
+        where: { projectId, userId, status: 'active' },
+        select: { role: true },
+      }),
+    ]);
+    const role = own ? 'owner' : (collab?.role as 'admin' | 'editor' | 'viewer' | undefined) ?? null;
+    if (roleCache.size > 500) roleCache.clear();
+    roleCache.set(key, { role: role ?? 'none', expires: Date.now() + 30_000 });
+    return role;
+  }
+
+  app.addHook('preHandler', async (req, reply) => {
+    const m = req.url.match(/^\/api\/projects\/([^/]+)(\/|$)/);
+    if (!m) return;
+    if (!['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) return;
+    const userId = (req as unknown as { user?: { id?: string } }).user?.id;
+    if (!userId) return; // 401 обработает requireAuth в самом роуте
+    const role = await getProjectRole(m[1]!, userId);
+    if (role === 'viewer') {
+      return reply.status(403).send({
+        error: 'Роль «Читатель» даёт доступ только для просмотра. Попросите владельца проекта изменить вашу роль.',
+      });
+    }
+  });
 
   await app.register(healthRoutes);
   await app.register(meRoutes);

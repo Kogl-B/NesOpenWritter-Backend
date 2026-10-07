@@ -20,7 +20,18 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
       },
       orderBy: { updatedAt: 'desc' },
     });
-    return { projects };
+    // роль текущего пользователя в каждом проекте (для read-only режима Читателя)
+    const collabs = await prisma.projectCollaborator.findMany({
+      where: { userId: req.user!.id, status: 'active', projectId: { in: projects.map((p) => p.id) } },
+      select: { projectId: true, role: true },
+    });
+    const roleByProject = new Map(collabs.map((c) => [c.projectId, c.role]));
+    return {
+      projects: projects.map((p) => ({
+        ...p,
+        myRole: p.ownerId === req.user!.id ? 'owner' : roleByProject.get(p.id) ?? 'viewer',
+      })),
+    };
   });
 
   app.post('/api/projects', async (req, reply) => {
@@ -57,7 +68,14 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
       },
     });
     if (!project) return reply.status(404).send({ error: 'Project not found' });
-    return { project };
+    // роль текущего пользователя (для read-only режима Читателя)
+    const myRole = project.ownerId === req.user!.id
+      ? 'owner'
+      : (await prisma.projectCollaborator.findFirst({
+          where: { projectId: project.id, userId: req.user!.id, status: 'active' },
+          select: { role: true },
+        }))?.role ?? 'viewer';
+    return { project: { ...project, myRole } };
   });
 
   app.patch<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {

@@ -159,6 +159,36 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = chapterContentSchema.parse(req.body);
+
+      // Автоверсии: страховка от потери рукописи (BUG-63). Создаём ревизию
+      // ПЕРЕД перезаписью, если (а) радикальное сокращение текста — похоже
+      // на затирание, или (б) с последней ревизии прошло больше минуты.
+      const before = await prisma.chapter.findUnique({
+        where: { id: req.params.chapterId },
+        select: { content: true, wordCount: true },
+      });
+      if (before && before.content != null) {
+        const beforeWords = before.wordCount ?? 0;
+        const afterWords = input.wordCount ?? 0;
+        const looksLikeWipe = beforeWords > 20 && afterWords <= 2;
+        const lastRev = await prisma.chapterRevision.findFirst({
+          where: { chapterId: req.params.chapterId },
+          orderBy: { createdAt: 'desc' },
+          select: { createdAt: true },
+        });
+        const stale = !lastRev || Date.now() - lastRev.createdAt.getTime() > 60_000;
+        if (looksLikeWipe || stale) {
+          await prisma.chapterRevision.create({
+            data: {
+              chapterId: req.params.chapterId,
+              label: looksLikeWipe ? 'автоперед затиранием' : 'автосохранение',
+              content: before.content as object,
+              wordCount: beforeWords,
+            },
+          });
+        }
+      }
+
       const result = await prisma.chapter.updateMany({
         where: { id: req.params.chapterId, projectId: req.params.projectId },
         data: {
