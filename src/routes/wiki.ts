@@ -87,17 +87,38 @@ export async function wikiRoutes(app: FastifyInstance) {
         select: { id: true },
       });
       if (existing) slug = `${slug}-${Date.now().toString(36)}`;
-      const page = await prisma.wikiPage.create({
-        data: {
-          projectId: req.params.projectId,
-          slug,
-          title: input.title,
-          content: input.content,
-          category: input.category ?? null,
-          tags: input.tags ?? [],
-          createdById: req.user!.id,
-        },
-      });
+      let page;
+      try {
+        page = await prisma.wikiPage.create({
+          data: {
+            projectId: req.params.projectId,
+            slug,
+            title: input.title,
+            content: input.content,
+            category: input.category ?? null,
+            tags: input.tags ?? [],
+            createdById: req.user!.id,
+          },
+        });
+      } catch (err) {
+        // Гонка двух одинаковых POST: второй findFirst ещё не видел первой записи
+        if ((err as { code?: string }).code === 'P2002') {
+          slug = `${slug}-${Date.now().toString(36)}`;
+          page = await prisma.wikiPage.create({
+            data: {
+              projectId: req.params.projectId,
+              slug,
+              title: input.title,
+              content: input.content,
+              category: input.category ?? null,
+              tags: input.tags ?? [],
+              createdById: req.user!.id,
+            },
+          });
+        } else {
+          throw err;
+        }
+      }
       return reply.status(201).send({ page });
     },
   );

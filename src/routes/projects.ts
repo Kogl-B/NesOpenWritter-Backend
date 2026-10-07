@@ -40,12 +40,25 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
 
   app.patch<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
     const input = projectUpdateSchema.parse(req.body);
+    // settings — JSON-объект с независимыми разделами (автосейв, структура
+    // истории и т.д.): мержим по ключам, чтобы один раздел не затирал другой
+    let settingsPatch: Record<string, unknown> | undefined;
+    if (input.settings !== undefined) {
+      const existing = await prisma.project.findUnique({
+        where: { id: req.params.id },
+        select: { settings: true },
+      });
+      settingsPatch = {
+        ...((existing?.settings as Record<string, unknown> | null) ?? {}),
+        ...(input.settings as Record<string, unknown>),
+      };
+    }
     const result = await prisma.project.updateMany({
       where: { id: req.params.id, ownerId: req.user!.id },
       data: {
         ...(input.name !== undefined && { name: input.name }),
         ...(input.description !== undefined && { description: input.description }),
-        ...(input.settings !== undefined && { settings: toJson(input.settings) }),
+        ...(settingsPatch !== undefined && { settings: toJson(settingsPatch) }),
       },
     });
     if (result.count === 0) return reply.status(404).send({ error: 'Project not found' });

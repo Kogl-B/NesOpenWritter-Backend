@@ -162,18 +162,29 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
         },
       });
       if (count !== 2) {
-        return reply.status(400).send({ error: 'Both characters must belong to project' });
+        return reply.status(400).send({ error: 'Оба персонажа должны принадлежать проекту' });
       }
-      const relation = await prisma.characterRelation.create({
-        data: {
-          projectId: req.params.projectId,
-          fromCharacterId: input.fromCharacterId,
-          toCharacterId: input.toCharacterId,
-          relationType: input.relationType,
-          strength: input.strength ?? 50,
-          description: input.description ?? null,
-        },
-      });
+      if (input.fromCharacterId === input.toCharacterId) {
+        return reply.status(400).send({ error: 'Нельзя связать персонажа с самим собой' });
+      }
+      let relation;
+      try {
+        relation = await prisma.characterRelation.create({
+          data: {
+            projectId: req.params.projectId,
+            fromCharacterId: input.fromCharacterId,
+            toCharacterId: input.toCharacterId,
+            relationType: input.relationType,
+            strength: input.strength ?? 50,
+            description: input.description ?? null,
+          },
+        });
+      } catch (err) {
+        if ((err as { code?: string }).code === 'P2002') {
+          return reply.status(409).send({ error: 'Такая связь уже существует' });
+        }
+        throw err;
+      }
       return reply.status(201).send({ relation });
     },
   );
@@ -239,7 +250,7 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
       }
       const input = genealogyCreateSchema.parse(req.body);
       if (input.parentId === input.childId) {
-        return reply.status(400).send({ error: 'parentId and childId must differ' });
+        return reply.status(400).send({ error: 'Персонаж не может быть родителем самому себе' });
       }
       const count = await prisma.character.count({
         where: {
@@ -248,16 +259,48 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
         },
       });
       if (count !== 2) {
-        return reply.status(400).send({ error: 'Both characters must belong to project' });
+        return reply.status(400).send({ error: 'Оба персонажа должны принадлежать проекту' });
       }
-      const edge = await prisma.genealogyEdge.create({
-        data: {
-          projectId: req.params.projectId,
-          parentId: input.parentId,
-          childId: input.childId,
-          kind: input.kind ?? 'biological',
-        },
+      // Цикл: если «ребёнок» уже является предком «родителя», дерево сломается.
+      const existingEdges = await prisma.genealogyEdge.findMany({
+        where: { projectId: req.params.projectId },
+        select: { parentId: true, childId: true },
       });
+      const childrenOf = new Map<string, string[]>();
+      for (const e of existingEdges) {
+        if (!childrenOf.has(e.parentId)) childrenOf.set(e.parentId, []);
+        childrenOf.get(e.parentId)!.push(e.childId);
+      }
+      const seen = new Set<string>([input.childId]);
+      const queue = [input.childId];
+      while (queue.length > 0) {
+        const cur = queue.shift()!;
+        for (const child of childrenOf.get(cur) ?? []) {
+          if (child === input.parentId) {
+            return reply.status(400).send({ error: 'Эта связь создаст цикл в родословной' });
+          }
+          if (!seen.has(child)) {
+            seen.add(child);
+            queue.push(child);
+          }
+        }
+      }
+      let edge;
+      try {
+        edge = await prisma.genealogyEdge.create({
+          data: {
+            projectId: req.params.projectId,
+            parentId: input.parentId,
+            childId: input.childId,
+            kind: input.kind ?? 'biological',
+          },
+        });
+      } catch (err) {
+        if ((err as { code?: string }).code === 'P2002') {
+          return reply.status(409).send({ error: 'Такая родственная связь уже существует' });
+        }
+        throw err;
+      }
       return reply.status(201).send({ edge });
     },
   );

@@ -229,9 +229,36 @@ export const mapElementCreateSchema = z.object({
   lodMin: z.number().int().min(0).max(10).optional(),
   lodMax: z.number().int().min(0).max(10).optional(),
   metadata: jsonObject.optional(),
+}).superRefine((data, ctx) => {
+  if (data.lodMin !== undefined && data.lodMax !== undefined && data.lodMin > data.lodMax) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['lodMin'],
+      message: 'lodMin не может быть больше lodMax',
+    });
+  }
 });
 
-export const mapElementUpdateSchema = mapElementCreateSchema.partial();
+export const mapElementUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(200).optional(),
+  description: nullableString.optional(),
+  kind: mapElementKindEnum.optional(),
+  subkind: nullableString.optional(),
+  locationId: nullableId.optional(),
+  geometry: geometrySchema.optional(),
+  style: jsonObject.optional(),
+  lodMin: z.number().int().min(0).max(10).optional(),
+  lodMax: z.number().int().min(0).max(10).optional(),
+  metadata: jsonObject.optional(),
+}).superRefine((data, ctx) => {
+  if (data.lodMin !== undefined && data.lodMax !== undefined && data.lodMin > data.lodMax) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['lodMin'],
+      message: 'lodMin не может быть больше lodMax',
+    });
+  }
+});
 
 // ----- MapDrawing -----------------------------------------------------------
 

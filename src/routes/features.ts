@@ -72,13 +72,57 @@ export async function featureRoutes(app: FastifyInstance) {
         monthsPerYear: z.number().int().min(1).max(24).default(12),
         daysPerMonth: z.number().int().min(1).max(60).default(30),
         moonCount: z.number().int().min(0).max(5).default(1),
-        epochName: z.string().max(50).default('Epoch'),
+        epochName: z.string().trim().max(50).default('Новая эра'),
         currentYear: z.number().int().default(1),
       }).parse(req.body);
       const calendar = await prisma.calendar.create({
         data: { ...input, projectId: req.params.projectId },
       });
       return reply.status(201).send({ calendar });
+    },
+  );
+
+  app.patch<{ Params: { projectId: string; calendarId: string } }>(
+    '/api/projects/:projectId/calendars/:calendarId',
+    async (req, reply) => {
+      if (!(await checkProject(req, reply))) return;
+      const input = z.object({
+        name: z.string().trim().min(1).max(100).optional(),
+        monthsPerYear: z.number().int().min(1).max(24).optional(),
+        daysPerMonth: z.number().int().min(1).max(60).optional(),
+        moonCount: z.number().int().min(0).max(5).optional(),
+        epochName: z.string().trim().max(50).optional(),
+        currentYear: z.number().int().optional(),
+        isDefault: z.boolean().optional(),
+      }).parse(req.body);
+      if (input.isDefault) {
+        // основной календарь в проекте может быть только один
+        await prisma.calendar.updateMany({
+          where: { projectId: req.params.projectId },
+          data: { isDefault: false },
+        });
+      }
+      try {
+        const calendar = await prisma.calendar.update({
+          where: { id: req.params.calendarId },
+          data: input,
+        });
+        return { calendar };
+      } catch {
+        return reply.status(404).send({ error: 'Календарь не найден' });
+      }
+    },
+  );
+
+  app.delete<{ Params: { projectId: string; calendarId: string } }>(
+    '/api/projects/:projectId/calendars/:calendarId',
+    async (req, reply) => {
+      if (!(await checkProject(req, reply))) return;
+      const result = await prisma.calendar.deleteMany({
+        where: { id: req.params.calendarId, projectId: req.params.projectId },
+      });
+      if (result.count === 0) return reply.status(404).send({ error: 'Календарь не найден' });
+      return reply.status(204).send();
     },
   );
 
@@ -104,9 +148,17 @@ export async function featureRoutes(app: FastifyInstance) {
         dominant: z.boolean().default(true),
         probability: z.number().min(0).max(1).default(0.5),
       }).parse(req.body);
-      const trait = await prisma.traitInheritance.create({
-        data: { ...input, projectId: req.params.projectId },
-      });
+      let trait;
+      try {
+        trait = await prisma.traitInheritance.create({
+          data: { ...input, projectId: req.params.projectId },
+        });
+      } catch (err) {
+        if ((err as { code?: string }).code === 'P2002') {
+          return reply.status(409).send({ error: 'Черта с таким названием уже существует' });
+        }
+        throw err;
+      }
       return reply.status(201).send({ trait });
     },
   );
@@ -159,8 +211,13 @@ export async function featureRoutes(app: FastifyInstance) {
         toPinId: z.string(),
         label: z.string().max(100).optional().nullable(),
       }).parse(req.body);
+      // Нить без пина в ответе ломает рендер доски — всегда включаем пины
       const thread = await prisma.investigationThread.create({
         data: { ...input, projectId: req.params.projectId },
+        include: {
+          fromPin: { select: { id: true, label: true, x: true, y: true } },
+          toPin: { select: { id: true, label: true, x: true, y: true } },
+        },
       });
       return reply.status(201).send({ thread });
     },
@@ -171,10 +228,14 @@ export async function featureRoutes(app: FastifyInstance) {
     async (req, reply) => {
       if (!(await checkProject(req, reply))) return;
       try {
+        // Нити ссылаются на пин: снимаем их первыми, иначе FK не даст удалить
+        await prisma.investigationThread.deleteMany({
+          where: { OR: [{ fromPinId: req.params.pinId }, { toPinId: req.params.pinId }] },
+        });
         await prisma.investigationPin.delete({ where: { id: req.params.pinId } });
         return reply.status(204).send();
       } catch {
-        return reply.status(404).send({ error: 'Pin not found' });
+        return reply.status(404).send({ error: 'Пин не найден' });
       }
     },
   );
@@ -285,7 +346,12 @@ export async function featureRoutes(app: FastifyInstance) {
         role: z.enum(['viewer', 'editor', 'admin']).default('editor'),
       }).parse(req.body);
       const targetUser = await prisma.user.findUnique({ where: { email: input.email } });
-      if (!targetUser) return reply.status(404).send({ error: 'User not found' });
+      if (!targetUser) {
+        return reply.status(404).send({ error: 'Пользователь с таким email не найден' });
+      }
+      if (targetUser.id === req.user!.id) {
+        return reply.status(400).send({ error: 'Нельзя пригласить самого себя' });
+      }
       const collab = await prisma.projectCollaborator.upsert({
         where: {
           projectId_userId: {

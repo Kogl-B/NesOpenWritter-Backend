@@ -58,9 +58,17 @@ export async function economyRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = currencySchema.parse(req.body);
-      const currency = await prisma.currency.create({
-        data: { ...input, projectId: req.params.projectId },
-      });
+      let currency;
+      try {
+        currency = await prisma.currency.create({
+          data: { ...input, projectId: req.params.projectId },
+        });
+      } catch (err) {
+        if ((err as { code?: string }).code === 'P2002') {
+          return reply.status(409).send({ error: 'Валюта с таким кодом уже существует' });
+        }
+        throw err;
+      }
       return reply.status(201).send({ currency });
     },
   );
@@ -106,10 +114,18 @@ export async function economyRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = resourceSchema.parse(req.body);
-      const resource = await prisma.resource.create({
-        data: { ...input, projectId: req.params.projectId },
-        include: { currency: { select: { code: true, symbol: true } } },
-      });
+      let resource;
+      try {
+        resource = await prisma.resource.create({
+          data: { ...input, projectId: req.params.projectId },
+          include: { currency: { select: { code: true, symbol: true } } },
+        });
+      } catch (err) {
+        if ((err as { code?: string }).code === 'P2002') {
+          return reply.status(409).send({ error: 'Ресурс с таким названием уже существует' });
+        }
+        throw err;
+      }
       return reply.status(201).send({ resource });
     },
   );
