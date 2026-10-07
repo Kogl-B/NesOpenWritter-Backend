@@ -352,7 +352,11 @@ export async function featureRoutes(app: FastifyInstance) {
         email: z.string().email(),
         role: z.enum(['viewer', 'editor', 'admin']).default('editor'),
       }).parse(req.body);
-      const targetUser = await prisma.user.findUnique({ where: { email: input.email } });
+      // better-auth хранит email в нижнем регистре — приводим к нему же,
+      // иначе вход с «QA.Example@…» работает, а приглашение его не находит
+      const targetUser = await prisma.user.findUnique({
+        where: { email: input.email.toLowerCase() },
+      });
       if (!targetUser) {
         return reply.status(404).send({ error: 'Пользователь с таким email не найден' });
       }
