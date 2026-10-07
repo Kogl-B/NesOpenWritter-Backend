@@ -170,7 +170,10 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       if (before && before.content != null) {
         const beforeWords = before.wordCount ?? 0;
         const afterWords = input.wordCount ?? 0;
-        const looksLikeWipe = beforeWords > 20 && afterWords <= 2;
+        // Порог с 20 снижен до 4: сцены QA-раундов короче 20 слов и защита
+        // не срабатывала — текст терялся безвозвратно. Любое сокращение
+        // до ≤2 слов при ≥4 раньше — подозрительно на затирание.
+        const looksLikeWipe = beforeWords >= 4 && afterWords <= 2;
         const lastRev = await prisma.chapterRevision.findFirst({
           where: { chapterId: req.params.chapterId },
           orderBy: { createdAt: 'desc' },
