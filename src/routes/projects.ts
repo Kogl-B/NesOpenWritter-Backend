@@ -48,7 +48,13 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
 
   app.get<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
     const project = await prisma.project.findFirst({
-      where: { id: req.params.id, ownerId: req.user!.id },
+      where: {
+        id: req.params.id,
+        OR: [
+          { ownerId: req.user!.id },
+          { ProjectCollaborator: { some: { userId: req.user!.id, status: 'active' } } },
+        ],
+      },
     });
     if (!project) return reply.status(404).send({ error: 'Project not found' });
     return { project };
