@@ -15,7 +15,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
       where: {
         OR: [
           { ownerId: req.user!.id },
-          { collaborations: { some: { userId: req.user!.id, status: 'active' } } },
+          { ProjectCollaborator: { some: { userId: req.user!.id, status: 'active' } } },
         ],
       },
       orderBy: { updatedAt: 'desc' },
