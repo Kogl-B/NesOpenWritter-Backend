@@ -184,7 +184,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
           await prisma.chapterRevision.create({
             data: {
               chapterId: req.params.chapterId,
-              label: looksLikeWipe ? 'автоперед затиранием' : 'автосохранение',
+              label: looksLikeWipe ? 'авто · перед затиранием' : 'автосохранение',
               content: before.content as object,
               wordCount: beforeWords,
             },
