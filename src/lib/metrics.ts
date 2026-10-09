@@ -321,10 +321,18 @@ export function endDbQuery(queryId: string): { timeMs: number; count: number } {
   };
 }
 
-// AsyncLocalStorage would be ideal, but for simplicity we use a per-request ID
+// AsyncLocalStorage привязывает БД-запросы Prisma-расширения к текущему
+// HTTP-запросу: onRequest делает enterWith({metricsId}), и контекст
+// «прилипает» к async-цепочке обработчика. Без этого per-route
+// dbQueries/dbTimeMs оставались нулями (глобальные счётчики работали).
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+export const requestContext = new AsyncLocalStorage<{ metricsId: string }>();
+
 const requestDbStats = new Map<string, { queries: number; timeMs: number }>();
 
 export function trackDbQuery(requestId: string, durationMs: number): void {
+  if (requestDbStats.size > 2000) requestDbStats.clear(); // страховка от обрывов onResponse
   let stats = requestDbStats.get(requestId);
   if (!stats) {
     stats = { queries: 0, timeMs: 0 };

@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { env } from './env.js';
+import { requestContext, trackDbQuery } from './metrics.js';
 
 // --- DB query timing for metrics ---
 // Счётчик инкрементируется client-extension'ом ($allOperations): комментарии
@@ -24,6 +25,9 @@ export const prisma = base.$extends({
       if (ms > 200 && queryCount.slow.length < 100) {
         queryCount.slow.push({ model: model ?? 'raw', action: operation, ms: Math.round(ms * 100) / 100 });
       }
+      // Атрибуция к HTTP-запросу (AsyncLocalStorage): вне запроса store пуст
+      const reqId = requestContext.getStore()?.metricsId;
+      if (reqId) trackDbQuery(reqId, ms);
       return result;
     },
   },

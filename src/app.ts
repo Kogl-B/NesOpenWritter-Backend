@@ -29,7 +29,7 @@ import { economyRoutes } from './routes/economy.js';
 import { featureRoutes } from './routes/features.js';
 import { wikiBookRoutes } from './routes/wikiBook.js';
 import { initSentry, captureError } from './lib/sentry.js';
-import { recordRequest, getDbStats } from './lib/metrics.js';
+import { recordRequest, getDbStats, requestContext } from './lib/metrics.js';
 import { prisma } from './lib/prisma.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -44,7 +44,11 @@ export async function buildApp(): Promise<FastifyInstance> {
   // --- Performance metrics middleware ---
   app.addHook('onRequest', async (req) => {
     (req as unknown as { _metricsStart: number })._metricsStart = performance.now();
-    (req as unknown as { _metricsId: string })._metricsId = `${req.id}-${Date.now()}`;
+    const metricsId = `${req.id}-${Date.now()}`;
+    (req as unknown as { _metricsId: string })._metricsId = metricsId;
+    // Контекст «прилипает» к async-цепочке запроса: Prisma-расширение
+    // атрибутирует время БД-запросов этому HTTP-запросу (dbQueries/dbTimeMs)
+    requestContext.enterWith({ metricsId });
   });
 
   app.addHook('onResponse', async (req, reply) => {
