@@ -1,6 +1,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 
 import { prisma } from '../lib/prisma.js';
+import { getUserPlan } from './account.js';
+import { getTier } from '../lib/tiers.js';
 import { toJson } from '../lib/access.js';
 import { projectCreateSchema, projectUpdateSchema } from '../lib/schemas.js';
 
@@ -36,13 +38,13 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
 
   app.post('/api/projects', async (req, reply) => {
     const input = projectCreateSchema.parse(req.body);
-    // Лимит Free-тарифа: до 3 проектов (env-перекрываем для тестов)
-    const freeLimit = Number(process.env.FREE_PROJECT_LIMIT ?? 3);
-    if (Number.isFinite(freeLimit) && freeLimit > 0) {
+    // Лимит проектов по тарифу подписки пользователя (tiers.ts); null = безлимит
+    const tier = getTier(await getUserPlan(req.user!.id));
+    if (tier.projectLimit != null) {
       const owned = await prisma.project.count({ where: { ownerId: req.user!.id } });
-      if (owned >= freeLimit) {
+      if (owned >= tier.projectLimit) {
         return reply.status(403).send({
-          error: `Лимит бесплатного тарифа: до ${freeLimit} проектов. Удалите лишний проект или перейдите на Pro.`,
+          error: `Достигнут лимит тарифа «${tier.name}»: ${tier.projectLimit} проектов. Освободите слот (удалите проект) или смените тариф в личном кабинете.`,
         });
       }
     }

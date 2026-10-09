@@ -9,10 +9,10 @@ export const meRoutes: FastifyPluginAsync = async (app) => {
     app.requireAuth(req);
     const settings = await prisma.user.findUnique({
       where: { id: req.user!.id },
-      select: { settings: true },
+      select: { settings: true, plan: true },
     });
     return reply.send({
-      user: req.user,
+      user: { ...req.user, plan: settings?.plan ?? 'test' },
       settings: settings?.settings ?? {},
     });
   });

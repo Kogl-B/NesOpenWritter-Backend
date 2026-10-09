@@ -25,6 +25,8 @@ model User {
   image            String?
   settings         Json                  @default("{}")
   twoFactorEnabled Boolean               @default(false)
+  /// Тариф подписки (backend/src/lib/tiers.ts); null/мусор = 'test'
+  plan             String?
   createdAt        DateTime              @default(now())
   updatedAt        DateTime              @updatedAt
 
