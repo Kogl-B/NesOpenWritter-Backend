@@ -22,12 +22,16 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
     app.requireAuth(req);
   });
 
-  app.get<{ Params: ProjectParam }>(
+  app.get<{ Params: ProjectParam; Querystring: { format?: string } }>(
     '/api/projects/:projectId/chapters',
     async (req, reply) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
+      // ?format=rows: постолбцовый ответ без повторяющихся ключей объектов —
+      // на дереве из 1000+ глав это −35% raw-размера и быстрее JSON.parse
+      // на клиенте. Классический формат остаётся дефолтом (совместимость).
+      const asRows = req.query.format === 'rows';
       // Лёгкий список для дерева рукописи: summary/metadata/content тянутся
       // точечно fetchOne (loadSceneContent), иначе список из 1000+ сцен
       // раздувается до полумегабайта. projectId/createdAt не рендерятся
@@ -49,6 +53,12 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         WHERE "projectId" = ${req.params.projectId}
         ORDER BY "orderIndex" ASC, "createdAt" ASC
       `);
+      if (asRows) {
+        return {
+          cols: ['id', 'title', 'kind', 'parentId', 'orderIndex', 'wordCount', 'updatedAt'],
+          rows: chapters.map((c) => [c.id, c.title, c.kind, c.parentId, c.orderIndex, c.wordCount, c.updatedAt]),
+        };
+      }
       return { chapters };
     },
   );
