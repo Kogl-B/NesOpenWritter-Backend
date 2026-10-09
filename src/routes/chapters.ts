@@ -14,6 +14,16 @@ import {
 } from '../lib/schemas.js';
 
 type ProjectParam = { projectId: string };
+
+/** FNV-1a: ~1ms на 200KB — дешёвый weak-etag для 304-условных ответов. */
+function hashBody(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
 type ChapterParam = { projectId: string; chapterId: string };
 type RevisionParam = { projectId: string; chapterId: string; revisionId: string };
 
@@ -53,13 +63,21 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         WHERE "projectId" = ${req.params.projectId}
         ORDER BY "orderIndex" ASC, "createdAt" ASC
       `);
-      if (asRows) {
-        return {
-          cols: ['id', 'title', 'kind', 'parentId', 'orderIndex', 'wordCount', 'updatedAt'],
-          rows: chapters.map((c) => [c.id, c.title, c.kind, c.parentId, c.orderIndex, c.wordCount, c.updatedAt]),
-        };
+      // ETag/304 (R26): повторные входы в проект не тянут 200+KB дерева, если
+      // оно не менялось. Weak-etag от тела ответа; If-None-Match → 304.
+      const body = asRows
+        ? {
+            cols: ['id', 'title', 'kind', 'parentId', 'orderIndex', 'wordCount', 'updatedAt'],
+            rows: chapters.map((c) => [c.id, c.title, c.kind, c.parentId, c.orderIndex, c.wordCount, c.updatedAt]),
+          }
+        : { chapters };
+      const etag = 'W/"' + hashBody(JSON.stringify(body)) + '"';
+      if (req.headers['if-none-match'] === etag) {
+        reply.status(304).send();
+        return;
       }
-      return { chapters };
+      reply.header('etag', etag);
+      return body;
     },
   );
 

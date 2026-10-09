@@ -87,6 +87,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: env.CORS_ORIGIN.split(',').map((o) => o.trim()),
     credentials: true,
+    // ETag нужен клиентскому 304-кэшу (api.ts) — без expose JS его не видит
+    exposedHeaders: ['ETag'],
   });
   await app.register(cookie);
   await app.register(sensible);
