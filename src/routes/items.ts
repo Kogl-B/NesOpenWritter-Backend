@@ -26,10 +26,12 @@ export const itemRoutes: FastifyPluginAsync = async (app) => {
       }
       const items = await prisma.item.findMany({
         where: { projectId: req.params.projectId },
+        // Списку карточек достаточно метаданных; summary/description
+        // приходят fetchOne при выборе предмета.
         select: {
           id: true, projectId: true, name: true, category: true, rarity: true,
           currentOwnerId: true, currentLocationId: true,
-          summary: true,
+          imagePath: true,
           createdAt: true, updatedAt: true,
         },
         orderBy: { updatedAt: 'desc' },
