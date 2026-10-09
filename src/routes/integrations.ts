@@ -9,6 +9,13 @@ import { getUserPlan, getUsageInfo } from './account.js';
 import { getTier } from '../lib/tiers.js';
 import { env } from '../lib/env.js';
 
+/** Origin текущего запроса с учётом прокси Railway. */
+function reqOrigin(req: { headers: Record<string, unknown>; protocol: string }): string {
+  const proto = (req.headers['x-forwarded-proto'] as string) ?? req.protocol;
+  const host = (req.headers['x-forwarded-host'] as string) ?? (req.headers.host as string);
+  return `${proto}://${host}`;
+}
+
 const restoreSchema = z.object({ fileId: z.string().min(1) });
 
 function backupFileName(projectName: string): string {
@@ -29,7 +36,7 @@ export const integrationRoutes: FastifyPluginAsync = async (app) => {
         error: 'Google-интеграция не настроена администратором (GOOGLE_CLIENT_ID/SECRET)',
       });
     }
-    return reply.redirect(getAuthUrl(req.user!.id));
+    return reply.redirect(getAuthUrl(req.user!.id, reqOrigin(req)));
   });
 
   app.get('/api/integrations/gdrive/callback', async (req, reply) => {
@@ -43,7 +50,7 @@ export const integrationRoutes: FastifyPluginAsync = async (app) => {
     const userId = verifyCallbackState(state ?? undefined);
     if (!userId) return back(false, 'bad state');
     try {
-      await exchangeCodeAndSave(code, userId);
+      await exchangeCodeAndSave(code, userId, reqOrigin(req));
       return back(true);
     } catch (e) {
       return back(false, e instanceof Error ? e.message.slice(0, 120) : 'exchange failed');

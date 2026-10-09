@@ -17,9 +17,8 @@ export function isGdriveConfigured(): boolean {
   return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
 }
 
-function redirectUri(): string {
-  // callback живёт на API-хосте (в деве это http://localhost:8090)
-  return `${env.BETTER_AUTH_URL.replace(/\/$/, '')}/api/integrations/gdrive/callback`;
+function redirectUri(origin: string): string {
+  return `${origin.replace(/\/$/, '')}/api/integrations/gdrive/callback`;
 }
 
 /** state = userId.hmac — проверяем на callback, чтобы знать чей это код. */
@@ -39,10 +38,10 @@ function verifyState(state: string): string | null {
   return userId;
 }
 
-export function getAuthUrl(userId: string): string {
+export function getAuthUrl(userId: string, origin: string): string {
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID!,
-    redirect_uri: redirectUri(),
+    redirect_uri: redirectUri(origin),
     response_type: 'code',
     scope: `${DRIVE_FILE_SCOPE} https://www.googleapis.com/auth/userinfo.email`,
     access_type: 'offline',
@@ -116,13 +115,13 @@ export async function getValidAccessToken(userId: string): Promise<GdriveTokens>
   return { accessToken: refreshed.access_token, email: integration.email ?? undefined };
 }
 
-export async function exchangeCodeAndSave(code: string, userId: string): Promise<void> {
+export async function exchangeCodeAndSave(code: string, userId: string, origin: string): Promise<void> {
   const tokens = await tokenRequest({
     client_id: env.GOOGLE_CLIENT_ID!,
     client_secret: env.GOOGLE_CLIENT_SECRET!,
     grant_type: 'authorization_code',
     code,
-    redirect_uri: redirectUri(),
+    redirect_uri: redirectUri(origin),
   });
   if (!tokens.refresh_token) {
     throw Object.assign(new Error('Google не вернул refresh_token (повторите подключение)'), {
