@@ -67,6 +67,11 @@ const routeMap = new Map<string, RouteStats>();
 const recentRequests: RequestMetric[] = [];
 const MAX_RECENT = 200;
 const MAX_ROUTES = 200;
+// Кольцевой буфер длительностей на маршрут: p50/p95 считаются по последним
+// окнам, а не по всей истории с.reset — иначе после reset проценты пустые,
+// а без reset avg маскирует хвост (R11: p95-хвост был невидим в avg).
+const routeDurations = new Map<string, number[]>();
+const MAX_DURATIONS = 128;
 
 let totalRequests = 0;
 let totalErrors = 0;
@@ -146,6 +151,14 @@ export function recordRequest(metric: RequestMetric): void {
   stats.dbTimeMs += metric.dbTimeMs;
   if (metric.statusCode >= 400) stats.errorCount++;
 
+  const durations = routeDurations.get(key);
+  if (durations) {
+    durations.push(metric.durationMs);
+    if (durations.length > MAX_DURATIONS) durations.shift();
+  } else {
+    routeDurations.set(key, [metric.durationMs]);
+  }
+
   // Recent requests ring buffer
   recentRequests.push(metric);
   if (recentRequests.length > MAX_RECENT) recentRequests.shift();
@@ -157,10 +170,20 @@ export function getMetrics(): MetricsSnapshot {
 
   // Sort routes by total time (descending) — top resource consumers
   const allRoutes = [...routeMap.values()].sort((a, b) => b.totalMs - a.totalMs);
-  const topRoutes = allRoutes.slice(0, 20).map((r) => ({
-    ...r,
-    avgMs: Math.round(r.avgMs * 100) / 100,
-  }));
+  const topRoutes = allRoutes.slice(0, 20).map((r) => {
+    const durations = (routeDurations.get(`${r.method} ${r.route}`) ?? []).slice().sort((a, b) => a - b);
+    const pick = (q: number) => {
+      if (durations.length === 0) return 0;
+      const idx = Math.min(durations.length - 1, Math.floor(q * durations.length));
+      return Math.round((durations[idx] ?? 0) * 100) / 100;
+    };
+    return {
+      ...r,
+      avgMs: Math.round(r.avgMs * 100) / 100,
+      p50Ms: pick(0.5),
+      p95Ms: pick(0.95),
+    };
+  });
 
   // Slowest recent requests
   const slowest = [...recentRequests]
@@ -212,6 +235,7 @@ export function getMetrics(): MetricsSnapshot {
 
 export function resetMetrics(): void {
   routeMap.clear();
+  routeDurations.clear();
   recentRequests.length = 0;
   totalRequests = 0;
   totalErrors = 0;

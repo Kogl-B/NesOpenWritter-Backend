@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
+import { Prisma } from '@prisma/client';
+
 import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership, toJson } from '../lib/access.js';
 import {
@@ -32,16 +34,24 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
-      const events = await prisma.timelineEvent.findMany({
-        where: { projectId: req.params.projectId },
-        select: {
-          id: true, projectId: true, name: true, summary: true,
-          at: true, atNumeric: true, durationNumeric: true, importance: true,
-          icon: true, color: true, locationId: true,
-          createdAt: true, updatedAt: true,
-        },
-        orderBy: [{ atNumeric: 'asc' }, { createdAt: 'asc' }],
-      });
+      // $queryRaw + срез projectId/createdAt (фронт их не использует):
+      // материализация через движок Prisma ~8ms на 100 строк против ~1ms raw
+      // (см. chapters.ts). Сортировка по createdAt сохранена как tiebreaker,
+      // хотя колонка не выбирается.
+      const events = await prisma.$queryRaw<
+        Array<{
+          id: string; name: string; summary: string | null;
+          at: string; atNumeric: number | null; durationNumeric: number | null;
+          importance: number; icon: string | null; color: string | null;
+          locationId: string | null; updatedAt: Date;
+        }>
+      >(Prisma.sql`
+        SELECT id, name, summary, at, "atNumeric", "durationNumeric",
+               importance, icon, color, "locationId", "updatedAt"
+        FROM timeline_events
+        WHERE "projectId" = ${req.params.projectId}
+        ORDER BY "atNumeric" ASC NULLS LAST, "createdAt" ASC
+      `);
       return { events };
     },
   );

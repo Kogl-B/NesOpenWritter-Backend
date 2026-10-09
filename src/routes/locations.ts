@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
+import { Prisma } from '@prisma/client';
+
 import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership, toJson } from '../lib/access.js';
 import { locationCreateSchema, locationUpdateSchema } from '../lib/schemas.js';
@@ -18,16 +20,20 @@ export const locationRoutes: FastifyPluginAsync = async (app) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
-      const locations = await prisma.location.findMany({
-        where: { projectId: req.params.projectId },
-        select: {
-          id: true, projectId: true, name: true, kind: true,
-          parentLocationId: true, lodLevel: true,
-          coordX: true, coordY: true,
-          createdAt: true, updatedAt: true,
-        },
-        orderBy: [{ lodLevel: 'asc' }, { name: 'asc' }],
-      });
+      // $queryRaw + срез projectId/createdAt — см. chapters.ts.
+      const locations = await prisma.$queryRaw<
+        Array<{
+          id: string; name: string; kind: string;
+          parentLocationId: string | null; lodLevel: number;
+          coordX: number; coordY: number; updatedAt: Date;
+        }>
+      >(Prisma.sql`
+        SELECT id, name, kind, "parentLocationId", "lodLevel",
+               "coordX", "coordY", "updatedAt"
+        FROM locations
+        WHERE "projectId" = ${req.params.projectId}
+        ORDER BY "lodLevel" ASC, name ASC
+      `);
       return { locations };
     },
   );

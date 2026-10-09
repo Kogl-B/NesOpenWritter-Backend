@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
+import { Prisma } from '@prisma/client';
+
 import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership, toJson } from '../lib/access.js';
 import {
@@ -24,18 +26,22 @@ export const itemRoutes: FastifyPluginAsync = async (app) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
-      const items = await prisma.item.findMany({
-        where: { projectId: req.params.projectId },
-        // Списку карточек достаточно метаданных; summary/description
-        // приходят fetchOne при выборе предмета.
-        select: {
-          id: true, projectId: true, name: true, category: true, rarity: true,
-          currentOwnerId: true, currentLocationId: true,
-          imagePath: true,
-          createdAt: true, updatedAt: true,
-        },
-        orderBy: { updatedAt: 'desc' },
-      });
+      // Списку карточек достаточно метаданных; summary/description
+      // приходят fetchOne при выборе предмета. $queryRaw + срез
+      // projectId/createdAt — см. chapters.ts.
+      const items = await prisma.$queryRaw<
+        Array<{
+          id: string; name: string; category: string; rarity: string;
+          currentOwnerId: string | null; currentLocationId: string | null;
+          imagePath: string | null; updatedAt: Date;
+        }>
+      >(Prisma.sql`
+        SELECT id, name, category, rarity, "currentOwnerId",
+               "currentLocationId", "imagePath", "updatedAt"
+        FROM items
+        WHERE "projectId" = ${req.params.projectId}
+        ORDER BY "updatedAt" DESC
+      `);
       return { items };
     },
   );
