@@ -11,6 +11,7 @@ import { loggerConfig } from './lib/logger.js';
 import authPlugin from './plugins/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { meRoutes } from './routes/me.js';
+import { accountRoutes } from './routes/account.js';
 import { projectRoutes } from './routes/projects.js';
 import { characterRoutes } from './routes/characters.js';
 import { itemRoutes } from './routes/items.js';
@@ -30,7 +31,7 @@ import { featureRoutes } from './routes/features.js';
 import { wikiBookRoutes } from './routes/wikiBook.js';
 import { initSentry, captureError } from './lib/sentry.js';
 import { recordRequest, getDbStats, requestContext } from './lib/metrics.js';
-import { prisma } from './lib/prisma.js';
+import { getProjectAccess } from './lib/access.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   initSentry();
@@ -112,23 +113,8 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   // RBAC (BUG-79): роль «Читатель» (viewer) — только чтение. Все изменяющие
   // запросы внутри /api/projects/:projectId/* от viewer'а отклоняются.
-  const roleCache = new Map<string, { role: string; expires: number }>();
-  async function getProjectRole(projectId: string, userId: string): Promise<'owner' | 'admin' | 'editor' | 'viewer' | null> {
-    const key = `${projectId}:${userId}`;
-    const hit = roleCache.get(key);
-    if (hit && Date.now() < hit.expires) return hit.role as 'owner' | 'admin' | 'editor' | 'viewer' | null;
-    const [own, collab] = await Promise.all([
-      prisma.project.findFirst({ where: { id: projectId, ownerId: userId }, select: { id: true } }),
-      prisma.projectCollaborator.findFirst({
-        where: { projectId, userId, status: 'active' },
-        select: { role: true },
-      }),
-    ]);
-    const role = own ? 'owner' : (collab?.role as 'admin' | 'editor' | 'viewer' | undefined) ?? null;
-    if (roleCache.size > 500) roleCache.clear();
-    roleCache.set(key, { role: role ?? 'none', expires: Date.now() + 30_000 });
-    return role;
-  }
+  // Кэш доступа общий с assertProjectOwnership (lib/access.ts, R22) —
+  // один набор запросов project+collaborator на промах, а не два.
 
   app.addHook('preHandler', async (req, reply) => {
     const m = req.url.match(/^\/api\/projects\/([^/]+)(\/|$)/);
@@ -136,7 +122,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     if (!['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) return;
     const userId = (req as unknown as { user?: { id?: string } }).user?.id;
     if (!userId) return; // 401 обработает requireAuth в самом роуте
-    const role = await getProjectRole(m[1]!, userId);
+    const role = await getProjectAccess(m[1]!, userId);
     if (role === 'viewer') {
       return reply.status(403).send({
         error: 'Роль «Читатель» даёт доступ только для просмотра. Попросите владельца проекта изменить вашу роль.',
@@ -146,6 +132,7 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   await app.register(healthRoutes);
   await app.register(meRoutes);
+  await app.register(accountRoutes);
   await app.register(projectRoutes);
   await app.register(characterRoutes);
   await app.register(itemRoutes);

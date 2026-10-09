@@ -1,25 +1,36 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from './prisma.js';
 
-// TTL-кэш для ownership проверок (снижает DB roundtrip на каждый request)
-const ownershipCache = new Map<string, { value: boolean; expires: number }>();
+/**
+ * Единый TTL-кэш доступа к проекту (R22): роль owner/admin/editor/viewer
+ * или null. Раньше RBAC-preHandler и assertProjectOwnership держали ДВА
+ * независимых кэша и на промахе делали одинаковые запросы (project +
+ * collaborator) дважды на мутирующих запросах. Теперь один источник:
+ * наличие доступа ⇔ роль не null.
+ */
+export type ProjectRole = 'owner' | 'admin' | 'editor' | 'viewer';
+
+const roleCache = new Map<string, { role: ProjectRole | null; expires: number }>();
 const CACHE_TTL_MS = 30_000; // 30 секунд
 
-function getCachedOwnership(projectId: string, userId: string): boolean | undefined {
+export async function getProjectAccess(projectId: string, userId: string): Promise<ProjectRole | null> {
   const key = `${projectId}:${userId}`;
-  const entry = ownershipCache.get(key);
-  if (!entry) return undefined;
-  if (Date.now() > entry.expires) {
-    ownershipCache.delete(key);
-    return undefined;
-  }
-  return entry.value;
-}
-
-function setCachedOwnership(projectId: string, userId: string, value: boolean): void {
-  const key = `${projectId}:${userId}`;
-  if (ownershipCache.size > 500) ownershipCache.clear(); // prevent leak
-  ownershipCache.set(key, { value, expires: Date.now() + CACHE_TTL_MS });
+  const hit = roleCache.get(key);
+  if (hit && Date.now() < hit.expires) return hit.role;
+  const [own, collab] = await Promise.all([
+    prisma.project.findFirst({
+      where: { id: projectId, ownerId: userId },
+      select: { id: true },
+    }),
+    prisma.projectCollaborator.findFirst({
+      where: { projectId, userId, status: 'active' },
+      select: { role: true },
+    }),
+  ]);
+  const role: ProjectRole | null = own ? 'owner' : (collab?.role as ProjectRole | undefined) ?? null;
+  if (roleCache.size > 500) roleCache.clear(); // prevent leak
+  roleCache.set(key, { role, expires: Date.now() + CACHE_TTL_MS });
+  return role;
 }
 
 export type JsonValue = Prisma.InputJsonValue;
@@ -37,22 +48,7 @@ export async function assertProjectOwnership(
   projectId: string,
   userId: string,
 ): Promise<boolean> {
-  const cached = getCachedOwnership(projectId, userId);
-  if (cached !== undefined) return cached;
-
-  const [own, collab] = await Promise.all([
-    prisma.project.findFirst({
-      where: { id: projectId, ownerId: userId },
-      select: { id: true },
-    }),
-    prisma.projectCollaborator.findFirst({
-      where: { projectId, userId, status: 'active' },
-      select: { id: true },
-    }),
-  ]);
-  const result = own !== null || collab !== null;
-  setCachedOwnership(projectId, userId, result);
-  return result;
+  return (await getProjectAccess(projectId, userId)) !== null;
 }
 
 /**
