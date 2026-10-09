@@ -164,32 +164,65 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       // Автоверсии: страховка от потери рукописи (BUG-63). Создаём ревизию
       // ПЕРЕД перезаписью, если (а) радикальное сокращение текста — похоже
       // на затирание, или (б) с последней ревизии прошло больше минуты.
-      const before = await prisma.chapter.findUnique({
-        where: { id: req.params.chapterId },
-        select: { content: true, wordCount: true },
-      });
-      if (before && before.content != null) {
+      // Content (тяжёлый JSONB) грузим ТОЛЬКО когда ревизия реально будет
+      // создана — автосейв ходит каждые ~8 секунд и не должен читать
+      // содержимое сцены целиком на каждый запрос.
+      const [before, lastRev] = await Promise.all([
+        prisma.chapter.findUnique({
+          where: { id: req.params.chapterId },
+          select: { wordCount: true },
+        }),
+        prisma.chapterRevision.findFirst({
+          where: { chapterId: req.params.chapterId },
+          orderBy: { createdAt: 'desc' },
+          select: { createdAt: true },
+        }),
+      ]);
+      if (before) {
         const beforeWords = before.wordCount ?? 0;
         const afterWords = input.wordCount ?? 0;
         // Порог с 20 снижен до 4: сцены QA-раундов короче 20 слов и защита
         // не срабатывала — текст терялся безвозвратно. Любое сокращение
         // до ≤2 слов при ≥4 раньше — подозрительно на затирание.
         const looksLikeWipe = beforeWords >= 4 && afterWords <= 2;
-        const lastRev = await prisma.chapterRevision.findFirst({
-          where: { chapterId: req.params.chapterId },
-          orderBy: { createdAt: 'desc' },
-          select: { createdAt: true },
-        });
         const stale = !lastRev || Date.now() - lastRev.createdAt.getTime() > 60_000;
         if (looksLikeWipe || stale) {
-          await prisma.chapterRevision.create({
-            data: {
-              chapterId: req.params.chapterId,
-              label: looksLikeWipe ? 'авто · перед затиранием' : 'автосохранение',
-              content: before.content as object,
-              wordCount: beforeWords,
-            },
-          });
+          const [content, keptAuto] = await prisma.$transaction([
+            prisma.chapter.findUnique({
+              where: { id: req.params.chapterId },
+              select: { content: true },
+            }),
+            // Ротация авто-ревизий: держим последние 50 на сцену. Ручные
+            // снапшоты (label без префикса «авто») не трогаем.
+            prisma.chapterRevision.findMany({
+              where: { chapterId: req.params.chapterId, label: { startsWith: 'авто' } },
+              orderBy: { createdAt: 'desc' },
+              take: 50,
+              select: { id: true },
+            }),
+          ]);
+          const label = looksLikeWipe ? 'авто · перед затиранием' : 'автосохранение';
+          await prisma.$transaction([
+            prisma.chapterRevision.create({
+              data: {
+                chapterId: req.params.chapterId,
+                label,
+                content: (content?.content ?? {}) as object,
+                wordCount: beforeWords,
+              },
+            }),
+            ...(keptAuto.length === 50
+              ? [
+                  prisma.chapterRevision.deleteMany({
+                    where: {
+                      chapterId: req.params.chapterId,
+                      label: { startsWith: 'авто' },
+                      id: { notIn: keptAuto.map((r) => r.id) },
+                    },
+                  }),
+                ]
+              : []),
+          ]);
         }
       }
 
@@ -342,6 +375,9 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       const revisions = await prisma.chapterRevision.findMany({
         where: { chapterId: req.params.chapterId },
         orderBy: { createdAt: 'desc' },
+        // Лимит: за месяцы работы автосейв накапливает сотни ревизий на
+        // сцену — тянуть весь список в историю незачем.
+        take: 100,
         select: {
           id: true,
           chapterId: true,
