@@ -23,6 +23,11 @@ function getClient(): S3Client {
       accessKeyId: env.R2_ACCESS_KEY_ID,
       secretAccessKey: env.R2_SECRET_ACCESS_KEY,
     },
+    // Новые @aws-sdk вписывают x-amz-checksum-* в подпись presign-URL, но
+    // браузер/curl при PUT эти заголовки не шлёт → SignatureDoesNotMatch.
+    // Для S3-совместимых хранилищ (R2) чексаммы не нужны.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
   });
   return cachedClient;
 }
