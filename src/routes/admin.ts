@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../lib/prisma.js';
 import { env } from '../lib/env.js';
-import { getMetrics, resetMetrics } from '../lib/metrics.js';
+import { getMetrics, resetMetrics, getDegradationAlerts } from '../lib/metrics.js';
 import { getDbMetrics } from '../lib/prisma.js';
 
 /**
@@ -43,6 +43,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return {
       ...getMetrics(),
       db: getDbMetrics(),
+      degradationAlerts: getDegradationAlerts(),
     };
   });
 

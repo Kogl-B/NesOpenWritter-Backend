@@ -107,6 +107,60 @@ setInterval(() => {
 
 // --- Public API ---
 
+/**
+ * Детектор деградации (R19): маршрут с p95 > P95_ALERT_MS при достаточном
+ * числе замеров — операционный сигнал, что хвост латентности стабилен, а не
+ * разовый выброс. Проверяется периодически, новые срабатывания пишутся
+ * WARN'ом в stderr процесса (лог бэка) и попадают в /admin/metrics.
+ * Утилитарные маршрусы (/admin/*) исключены — их единичные вызовы сами
+ * по себе дороги и не отражают пользовательский контур.
+ */
+export interface DegradationAlert {
+  route: string;
+  method: string;
+  p95Ms: number;
+  count: number;
+  at: number;
+}
+const P95_ALERT_MS = 500;
+const P95_ALERT_MIN_COUNT = 10;
+const lastAlerts: DegradationAlert[] = [];
+const MAX_ALERTS = 50;
+
+function percentile(durations: number[], q: number): number {
+  if (durations.length === 0) return 0;
+  const sorted = durations.slice().sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0;
+}
+
+function scanForDegradation(): void {
+  for (const [key, durations] of routeDurations) {
+    if (durations.length < P95_ALERT_MIN_COUNT) continue;
+    const [method, route] = key.split(' ') as [string, string];
+    if (route.startsWith('/api/admin/')) continue;
+    const p95 = percentile(durations, 0.95);
+    if (p95 > P95_ALERT_MS) {
+      const alert: DegradationAlert = { route, method, p95Ms: Math.round(p95), count: durations.length, at: Date.now() };
+      lastAlerts.push(alert);
+      if (lastAlerts.length > MAX_ALERTS) lastAlerts.shift();
+      // stderr процесса: попадает в лог бэка рядом с pino-строками
+      console.warn(`[metrics-degradation] ${method} ${route} p95=${alert.p95Ms}ms over ${alert.count} samples`);
+    }
+  }
+}
+
+setInterval(() => {
+  try {
+    scanForDegradation();
+  } catch {
+    /* мониторинг не должен ронять процесс */
+  }
+}, 30_000).unref();
+
+export function getDegradationAlerts(): DegradationAlert[] {
+  return lastAlerts.slice(-10);
+}
+
 export function recordRequest(metric: RequestMetric): void {
   totalRequests++;
   totalResponseMs += metric.durationMs;
@@ -237,6 +291,7 @@ export function resetMetrics(): void {
   routeMap.clear();
   routeDurations.clear();
   recentRequests.length = 0;
+  lastAlerts.length = 0;
   totalRequests = 0;
   totalErrors = 0;
   totalResponseMs = 0;
