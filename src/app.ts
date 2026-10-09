@@ -12,6 +12,7 @@ import authPlugin from './plugins/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { meRoutes } from './routes/me.js';
 import { accountRoutes } from './routes/account.js';
+import { integrationRoutes } from './routes/integrations.js';
 import { projectRoutes } from './routes/projects.js';
 import { characterRoutes } from './routes/characters.js';
 import { itemRoutes } from './routes/items.js';
@@ -135,6 +136,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(healthRoutes);
   await app.register(meRoutes);
   await app.register(accountRoutes);
+  await app.register(integrationRoutes);
   await app.register(projectRoutes);
   await app.register(characterRoutes);
   await app.register(itemRoutes);

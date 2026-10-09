@@ -30,12 +30,32 @@ model User {
   createdAt        DateTime              @default(now())
   updatedAt        DateTime              @updatedAt
 
-  sessions   Session[]
-  accounts   Account[]
-  projects   Project[]
-  twoFactors TwoFactor[]
+  sessions    Session[]
+  accounts    Account[]
+  projects    Project[]
+  twoFactors  TwoFactor[]
+  integrations UserIntegration[]
 
   @@map("users")
+}
+
+/// Внешние интеграции пользователя (Google Drive и т.п.)
+model UserIntegration {
+  id           String    @id @default(cuid())
+  userId       String
+  provider     String // 'gdrive'
+  accessToken  String?
+  refreshToken String?
+  expiresAt    DateTime?
+  email        String? // подключённый аккаунт Google
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@index([userId])
+  @@map("user_integrations")
 }
 
 model TwoFactor {
