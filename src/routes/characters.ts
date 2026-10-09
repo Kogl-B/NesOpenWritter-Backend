@@ -31,19 +31,19 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(404).send({ error: 'Project not found' });
       }
       // Лёгкий список для сайдбара: biography/summary/traits не тянем —
-      // полная запись приходит fetchOne при выборе персонажа.
-      // $queryRaw: материализация 454 строк через движок Prisma ~17ms
-      // против ~2ms raw при идентичном SQL (см. chapters.ts).
+      // полная запись приходит fetchOne при выборе персонажа. projectId/
+      // createdAt не используются фронтом в списке. $queryRaw: материализация
+      // 454 строк через движок Prisma ~17ms против ~2ms raw (см. chapters.ts).
       const characters = await prisma.$queryRaw<
         Array<{
-          id: string; projectId: string; name: string;
+          id: string; name: string;
           shortName: string | null; faction: string | null;
           status: string | null; portraitPath: string | null;
-          createdAt: Date; updatedAt: Date;
+          updatedAt: Date;
         }>
       >(Prisma.sql`
-        SELECT id, "projectId", name, "shortName", faction, status,
-               "portraitPath", "createdAt", "updatedAt"
+        SELECT id, name, "shortName", faction, status,
+               "portraitPath", "updatedAt"
         FROM characters
         WHERE "projectId" = ${req.params.projectId}
         ORDER BY "updatedAt" DESC

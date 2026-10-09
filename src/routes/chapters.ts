@@ -30,19 +30,21 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       }
       // Лёгкий список для дерева рукописи: summary/metadata/content тянутся
       // точечно fetchOne (loadSceneContent), иначе список из 1000+ сцен
-      // раздувается до полумегабайта.
+      // раздувается до полумегабайта. projectId/createdAt не рендерятся
+      // нигде (DiffViewer берёт их из полной записи) — их нет в SELECT,
+      // но ORDER BY по createdAt остаётся: сортировка по невыбранной
+      // колонке легальна и стабильна.
       // $queryRaw вместо findMany: на 1443 строках материализация через
       // Rust-движок Prisma стоит ~50ms против ~3ms raw при том же SQL.
-      // Колонки держать в синкроне с select ниже и prisma/schema.prisma.
       const chapters = await prisma.$queryRaw<
         Array<{
-          id: string; projectId: string; title: string; kind: string;
+          id: string; title: string; kind: string;
           parentId: string | null; orderIndex: number; wordCount: number;
-          createdAt: Date; updatedAt: Date;
+          updatedAt: Date;
         }>
       >(Prisma.sql`
-        SELECT id, "projectId", title, kind, "parentId", "orderIndex",
-               "wordCount", "createdAt", "updatedAt"
+        SELECT id, title, kind, "parentId", "orderIndex",
+               "wordCount", "updatedAt"
         FROM chapters
         WHERE "projectId" = ${req.params.projectId}
         ORDER BY "orderIndex" ASC, "createdAt" ASC
