@@ -35,118 +35,102 @@ export const searchRoutes: FastifyPluginAsync = async (app) => {
       : (ALL_TYPES as readonly string[])) as readonly string[];
 
     const ic = { mode: 'insensitive' as const };
+
+    // Все типы ищем параллельно: последовательные await давали сумму
+    // шести ILIKE-scan'ов вместо максимума одного.
+    const [chars, items, locations, events, chapters, tags] = await Promise.all([
+      types.includes('character')
+        ? prisma.character.findMany({
+            where: {
+              projectId: req.params.projectId,
+              OR: [
+                { name: { contains: q, ...ic } },
+                { shortName: { contains: q, ...ic } },
+                { summary: { contains: q, ...ic } },
+                { biography: { contains: q, ...ic } },
+              ],
+            },
+            take: limit,
+            select: { id: true, name: true, summary: true },
+          })
+        : Promise.resolve([]),
+      types.includes('item')
+        ? prisma.item.findMany({
+            where: {
+              projectId: req.params.projectId,
+              OR: [
+                { name: { contains: q, ...ic } },
+                { summary: { contains: q, ...ic } },
+                { description: { contains: q, ...ic } },
+              ],
+            },
+            take: limit,
+            select: { id: true, name: true, summary: true },
+          })
+        : Promise.resolve([]),
+      types.includes('location')
+        ? prisma.location.findMany({
+            where: {
+              projectId: req.params.projectId,
+              OR: [
+                { name: { contains: q, ...ic } },
+                { shortName: { contains: q, ...ic } },
+                { description: { contains: q, ...ic } },
+              ],
+            },
+            take: limit,
+            select: { id: true, name: true, description: true },
+          })
+        : Promise.resolve([]),
+      types.includes('event')
+        ? prisma.timelineEvent.findMany({
+            where: {
+              projectId: req.params.projectId,
+              OR: [
+                { name: { contains: q, ...ic } },
+                { summary: { contains: q, ...ic } },
+                { description: { contains: q, ...ic } },
+              ],
+            },
+            take: limit,
+            select: { id: true, name: true, summary: true },
+          })
+        : Promise.resolve([]),
+      types.includes('chapter')
+        ? prisma.chapter.findMany({
+            where: {
+              projectId: req.params.projectId,
+              OR: [
+                { title: { contains: q, ...ic } },
+                { summary: { contains: q, ...ic } },
+              ],
+            },
+            take: limit,
+            select: { id: true, title: true, summary: true },
+          })
+        : Promise.resolve([]),
+      types.includes('tag')
+        ? prisma.tag.findMany({
+            where: {
+              projectId: req.params.projectId,
+              OR: [
+                { name: { contains: q, ...ic } },
+                { description: { contains: q, ...ic } },
+              ],
+            },
+            take: limit,
+            select: { id: true, name: true, description: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
     const hits: SearchHit[] = [];
-
-    if (types.includes('character')) {
-      const chars = await prisma.character.findMany({
-        where: {
-          projectId: req.params.projectId,
-          OR: [
-            { name: { contains: q, ...ic } },
-            { shortName: { contains: q, ...ic } },
-            { summary: { contains: q, ...ic } },
-            { biography: { contains: q, ...ic } },
-          ],
-        },
-        take: limit,
-        select: { id: true, name: true, summary: true },
-      });
-      for (const c of chars)
-        hits.push({ entityType: 'character', id: c.id, name: c.name, preview: c.summary });
-    }
-
-    if (types.includes('item')) {
-      const items = await prisma.item.findMany({
-        where: {
-          projectId: req.params.projectId,
-          OR: [
-            { name: { contains: q, ...ic } },
-            { summary: { contains: q, ...ic } },
-            { description: { contains: q, ...ic } },
-          ],
-        },
-        take: limit,
-        select: { id: true, name: true, summary: true },
-      });
-      for (const i of items)
-        hits.push({ entityType: 'item', id: i.id, name: i.name, preview: i.summary });
-    }
-
-    if (types.includes('location')) {
-      const locations = await prisma.location.findMany({
-        where: {
-          projectId: req.params.projectId,
-          OR: [
-            { name: { contains: q, ...ic } },
-            { shortName: { contains: q, ...ic } },
-            { description: { contains: q, ...ic } },
-          ],
-        },
-        take: limit,
-        select: { id: true, name: true, description: true },
-      });
-      for (const l of locations)
-        hits.push({
-          entityType: 'location',
-          id: l.id,
-          name: l.name,
-          preview: l.description,
-        });
-    }
-
-    if (types.includes('event')) {
-      const events = await prisma.timelineEvent.findMany({
-        where: {
-          projectId: req.params.projectId,
-          OR: [
-            { name: { contains: q, ...ic } },
-            { summary: { contains: q, ...ic } },
-            { description: { contains: q, ...ic } },
-          ],
-        },
-        take: limit,
-        select: { id: true, name: true, summary: true },
-      });
-      for (const e of events)
-        hits.push({ entityType: 'event', id: e.id, name: e.name, preview: e.summary });
-    }
-
-    if (types.includes('chapter')) {
-      const chapters = await prisma.chapter.findMany({
-        where: {
-          projectId: req.params.projectId,
-          OR: [
-            { title: { contains: q, ...ic } },
-            { summary: { contains: q, ...ic } },
-          ],
-        },
-        take: limit,
-        select: { id: true, title: true, summary: true },
-      });
-      for (const ch of chapters)
-        hits.push({
-          entityType: 'chapter',
-          id: ch.id,
-          name: ch.title,
-          preview: ch.summary,
-        });
-    }
-
-    if (types.includes('tag')) {
-      const tags = await prisma.tag.findMany({
-        where: {
-          projectId: req.params.projectId,
-          OR: [
-            { name: { contains: q, ...ic } },
-            { description: { contains: q, ...ic } },
-          ],
-        },
-        take: limit,
-        select: { id: true, name: true, description: true },
-      });
-      for (const t of tags)
-        hits.push({ entityType: 'tag', id: t.id, name: t.name, preview: t.description });
-    }
+    for (const c of chars) hits.push({ entityType: 'character', id: c.id, name: c.name, preview: c.summary });
+    for (const i of items) hits.push({ entityType: 'item', id: i.id, name: i.name, preview: i.summary });
+    for (const l of locations) hits.push({ entityType: 'location', id: l.id, name: l.name, preview: l.description });
+    for (const e of events) hits.push({ entityType: 'event', id: e.id, name: e.name, preview: e.summary });
+    for (const ch of chapters) hits.push({ entityType: 'chapter', id: ch.id, name: ch.title, preview: ch.summary });
+    for (const t of tags) hits.push({ entityType: 'tag', id: t.id, name: t.name, preview: t.description });
 
     return { q, results: hits.slice(0, limit), total: hits.length };
   });
