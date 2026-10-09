@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import cookie from '@fastify/cookie';
 import helmet from '@fastify/helmet';
 import sensible from '@fastify/sensible';
+import compress from '@fastify/compress';
 import { ZodError } from 'zod';
 
 import { env } from './lib/env.js';
@@ -67,6 +68,13 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   // DB query timing via Prisma $use middleware is in lib/prisma.ts
 
+  // gzip для JSON-ответов: списки сущностей (главы/персонажи) уходят сотнями KB,
+  // без сжатия это главный трафик на мобильных клиентах. Только gzip — brotli
+  // на динамических ответах дороже по CPU при сопоставимом выигрыше.
+  await app.register(compress, {
+    encodings: ['gzip', 'identity'],
+    threshold: 512,
+  });
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(cors, {
     origin: env.CORS_ORIGIN.split(',').map((o) => o.trim()),

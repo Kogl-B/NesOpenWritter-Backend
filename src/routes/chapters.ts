@@ -29,12 +29,13 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       const chapters = await prisma.chapter.findMany({
         where: { projectId: req.params.projectId },
         orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],
+        // Лёгкий список для дерева рукописи: summary/metadata/content тянутся
+        // точечно fetchOne (loadSceneContent), иначе список из 1000+ сцен
+        // раздувается до полумегабайта.
         select: {
           id: true, projectId: true, title: true, kind: true,
           parentId: true, orderIndex: true,
-          summary: true, wordCount: true,
-          eventId: true, locationId: true,
-          metadata: true,
+          wordCount: true,
           createdAt: true, updatedAt: true,
         },
       });
