@@ -175,17 +175,17 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       // Content (тяжёлый JSONB) грузим ТОЛЬКО когда ревизия реально будет
       // создана — автосейв ходит каждые ~8 секунд и не должен читать
       // содержимое сцены целиком на каждый запрос.
-      const [before, lastRev] = await Promise.all([
-        prisma.chapter.findUnique({
-          where: { id: req.params.chapterId },
-          select: { wordCount: true },
-        }),
-        prisma.chapterRevision.findFirst({
-          where: { chapterId: req.params.chapterId },
-          orderBy: { createdAt: 'desc' },
-          select: { createdAt: true },
-        }),
-      ]);
+      // Предчек одним raw-запросом (wordCount + дата последней ревизии):
+      // два findFirst через движок Prisma стоили ~8ms на каждый автосейв.
+      const [before] = await prisma.$queryRaw<
+        Array<{ wordCount: number | null; lastRevAt: Date | null }>
+      >(Prisma.sql`
+        SELECT c."wordCount",
+               (SELECT max(r."createdAt") FROM chapter_revisions r
+                 WHERE r."chapterId" = c.id) AS "lastRevAt"
+        FROM chapters c
+        WHERE c.id = ${req.params.chapterId} AND c."projectId" = ${req.params.projectId}
+      `);
       if (before) {
         const beforeWords = before.wordCount ?? 0;
         const afterWords = input.wordCount ?? 0;
@@ -193,7 +193,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         // не срабатывала — текст терялся безвозвратно. Любое сокращение
         // до ≤2 слов при ≥4 раньше — подозрительно на затирание.
         const looksLikeWipe = beforeWords >= 4 && afterWords <= 2;
-        const stale = !lastRev || Date.now() - lastRev.createdAt.getTime() > 60_000;
+        const stale = !before.lastRevAt || Date.now() - before.lastRevAt.getTime() > 60_000;
         if (looksLikeWipe || stale) {
           const [content, keptAuto] = await prisma.$transaction([
             prisma.chapter.findUnique({
@@ -234,19 +234,23 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      const result = await prisma.chapter.updateMany({
-        where: { id: req.params.chapterId, projectId: req.params.projectId },
-        data: {
-          content: toJson(input.content),
-          ...(input.wordCount !== undefined && { wordCount: input.wordCount }),
-        },
-      });
-      if (result.count === 0) return reply.status(404).send({ error: 'Chapter not found' });
-      const chapter = await prisma.chapter.findUnique({
-        where: { id: req.params.chapterId },
-        select: { id: true, wordCount: true, updatedAt: true },
-      });
-      return { chapter };
+      // Запись + ответ одним UPDATE ... RETURNING: отдельный findUnique
+      // после updateMany добавлял ~4ms на каждый автосейв.
+      const json = JSON.stringify(input.content);
+      const updated = await prisma.$queryRaw<
+        Array<{ id: string; wordCount: number; updatedAt: Date }>
+      >(Prisma.sql`
+        UPDATE chapters
+        SET content = ${json}::jsonb,
+            "updatedAt" = now()
+            ${input.wordCount !== undefined ? Prisma.sql`, "wordCount" = ${input.wordCount}` : Prisma.empty}
+        WHERE id = ${req.params.chapterId} AND "projectId" = ${req.params.projectId}
+        RETURNING id, "wordCount", "updatedAt"
+      `);
+      if (updated.length === 0) {
+        return reply.status(404).send({ error: 'Chapter not found' });
+      }
+      return { chapter: updated[0] };
     },
   );
 

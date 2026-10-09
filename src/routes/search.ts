@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
+import { Prisma } from '@prisma/client';
+
 import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership } from '../lib/access.js';
 import { searchQuerySchema } from '../lib/schemas.js';
@@ -34,104 +36,107 @@ export const searchRoutes: FastifyPluginAsync = async (app) => {
       ? parsed.types
       : (ALL_TYPES as readonly string[])) as readonly string[];
 
-    const ic = { mode: 'insensitive' as const };
+    // Один UNION ALL вместо шести параллельных findMany: шесть хопов через
+    // движок Prisma (~5-17ms каждый на материализации) сжимаются в один,
+    // seq-scan'ы таблиц идут параллельно внутри самого Postgres. Порядок
+    // веток сохраняется ординалом — фронт группирует результаты по типам
+    // в порядке declared above (total считается до среза, как раньше).
+    const P = req.params.projectId;
+    const like = `%${q}%`;
+    const branches: Array<{ ordinal: number; sql: Prisma.Sql }> = [];
+    let ordinal = 0;
+    if (types.includes('character')) {
+      // OR-фильтр по четырём колонкам плановик исполняет seq-фильтром по
+      // всем строкам проекта (~28ms на 454 строках из-за ILIKE-эвалов).
+      // IN (UNION ...) заставляет каждую колонку идти своим trigram-индексом
+      // (см. миграцию 20261009150000_search_trgm_characters) — ~6ms.
+      branches.push({
+        ordinal: ordinal++,
+        sql: Prisma.sql`
+          SELECT ${ordinal}::int AS ord, 'character'::text AS "entityType", id, name, summary AS preview
+          FROM characters
+          WHERE "projectId" = ${P} AND id IN (
+            SELECT id FROM characters WHERE "projectId" = ${P} AND name ILIKE ${like}
+            UNION SELECT id FROM characters WHERE "projectId" = ${P} AND "shortName" ILIKE ${like}
+            UNION SELECT id FROM characters WHERE "projectId" = ${P} AND summary ILIKE ${like}
+            UNION SELECT id FROM characters WHERE "projectId" = ${P} AND biography ILIKE ${like}
+          )
+          LIMIT ${limit}`,
+      });
+    }
+    if (types.includes('item')) {
+      branches.push({
+        ordinal: ordinal++,
+        sql: Prisma.sql`
+          SELECT ${ordinal}::int AS ord, 'item'::text AS "entityType", id, name, summary AS preview
+          FROM items
+          WHERE "projectId" = ${P} AND (name ILIKE ${like} OR summary ILIKE ${like}
+            OR description ILIKE ${like})
+          LIMIT ${limit}`,
+      });
+    }
+    if (types.includes('location')) {
+      branches.push({
+        ordinal: ordinal++,
+        sql: Prisma.sql`
+          SELECT ${ordinal}::int AS ord, 'location'::text AS "entityType", id, name, description AS preview
+          FROM locations
+          WHERE "projectId" = ${P} AND (name ILIKE ${like} OR "shortName" ILIKE ${like}
+            OR description ILIKE ${like})
+          LIMIT ${limit}`,
+      });
+    }
+    if (types.includes('event')) {
+      branches.push({
+        ordinal: ordinal++,
+        sql: Prisma.sql`
+          SELECT ${ordinal}::int AS ord, 'event'::text AS "entityType", id, name, summary AS preview
+          FROM timeline_events
+          WHERE "projectId" = ${P} AND (name ILIKE ${like} OR summary ILIKE ${like}
+            OR description ILIKE ${like})
+          LIMIT ${limit}`,
+      });
+    }
+    if (types.includes('chapter')) {
+      branches.push({
+        ordinal: ordinal++,
+        sql: Prisma.sql`
+          SELECT ${ordinal}::int AS ord, 'chapter'::text AS "entityType", id, title AS name, summary AS preview
+          FROM chapters
+          WHERE "projectId" = ${P} AND (title ILIKE ${like} OR summary ILIKE ${like})
+          LIMIT ${limit}`,
+      });
+    }
+    if (types.includes('tag')) {
+      branches.push({
+        ordinal: ordinal++,
+        sql: Prisma.sql`
+          SELECT ${ordinal}::int AS ord, 'tag'::text AS "entityType", id, name, description AS preview
+          FROM tags
+          WHERE "projectId" = ${P} AND (name ILIKE ${like} OR description ILIKE ${like})
+          LIMIT ${limit}`,
+      });
+    }
 
-    // Все типы ищем параллельно: последовательные await давали сумму
-    // шести ILIKE-scan'ов вместо максимума одного.
-    const [chars, items, locations, events, chapters, tags] = await Promise.all([
-      types.includes('character')
-        ? prisma.character.findMany({
-            where: {
-              projectId: req.params.projectId,
-              OR: [
-                { name: { contains: q, ...ic } },
-                { shortName: { contains: q, ...ic } },
-                { summary: { contains: q, ...ic } },
-                { biography: { contains: q, ...ic } },
-              ],
-            },
-            take: limit,
-            select: { id: true, name: true, summary: true },
-          })
-        : Promise.resolve([]),
-      types.includes('item')
-        ? prisma.item.findMany({
-            where: {
-              projectId: req.params.projectId,
-              OR: [
-                { name: { contains: q, ...ic } },
-                { summary: { contains: q, ...ic } },
-                { description: { contains: q, ...ic } },
-              ],
-            },
-            take: limit,
-            select: { id: true, name: true, summary: true },
-          })
-        : Promise.resolve([]),
-      types.includes('location')
-        ? prisma.location.findMany({
-            where: {
-              projectId: req.params.projectId,
-              OR: [
-                { name: { contains: q, ...ic } },
-                { shortName: { contains: q, ...ic } },
-                { description: { contains: q, ...ic } },
-              ],
-            },
-            take: limit,
-            select: { id: true, name: true, description: true },
-          })
-        : Promise.resolve([]),
-      types.includes('event')
-        ? prisma.timelineEvent.findMany({
-            where: {
-              projectId: req.params.projectId,
-              OR: [
-                { name: { contains: q, ...ic } },
-                { summary: { contains: q, ...ic } },
-                { description: { contains: q, ...ic } },
-              ],
-            },
-            take: limit,
-            select: { id: true, name: true, summary: true },
-          })
-        : Promise.resolve([]),
-      types.includes('chapter')
-        ? prisma.chapter.findMany({
-            where: {
-              projectId: req.params.projectId,
-              OR: [
-                { title: { contains: q, ...ic } },
-                { summary: { contains: q, ...ic } },
-              ],
-            },
-            take: limit,
-            select: { id: true, title: true, summary: true },
-          })
-        : Promise.resolve([]),
-      types.includes('tag')
-        ? prisma.tag.findMany({
-            where: {
-              projectId: req.params.projectId,
-              OR: [
-                { name: { contains: q, ...ic } },
-                { description: { contains: q, ...ic } },
-              ],
-            },
-            take: limit,
-            select: { id: true, name: true, description: true },
-          })
-        : Promise.resolve([]),
-    ]);
+    if (branches.length === 0) {
+      return { q, results: [], total: 0 };
+    }
 
-    const hits: SearchHit[] = [];
-    for (const c of chars) hits.push({ entityType: 'character', id: c.id, name: c.name, preview: c.summary });
-    for (const i of items) hits.push({ entityType: 'item', id: i.id, name: i.name, preview: i.summary });
-    for (const l of locations) hits.push({ entityType: 'location', id: l.id, name: l.name, preview: l.description });
-    for (const e of events) hits.push({ entityType: 'event', id: e.id, name: e.name, preview: e.summary });
-    for (const ch of chapters) hits.push({ entityType: 'chapter', id: ch.id, name: ch.title, preview: ch.summary });
-    for (const t of tags) hits.push({ entityType: 'tag', id: t.id, name: t.name, preview: t.description });
+    const parts = branches.map((b) => b.sql);
+    const query = Prisma.join(
+      parts.map((p) => Prisma.sql`(${p})`),
+      ' UNION ALL ',
+    );
+    const rows = await prisma.$queryRaw<
+      Array<{ ord: number; entityType: SearchHit['entityType']; id: string; name: string; preview: string | null }>
+    >(Prisma.sql`SELECT * FROM (${query}) AS u ORDER BY ord`);
 
+    const hits: SearchHit[] = rows.map((r) => ({
+      entityType: r.entityType,
+      id: r.id,
+      name: r.name,
+      preview: r.preview,
+    }));
     return { q, results: hits.slice(0, limit), total: hits.length };
   });
 };
