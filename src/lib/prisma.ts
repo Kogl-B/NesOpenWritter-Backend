@@ -1,13 +1,33 @@
 import { PrismaClient } from '@prisma/client';
 import { env } from './env.js';
 
-export const prisma = new PrismaClient({
+// --- DB query timing for metrics ---
+// Счётчик инкрементируется client-extension'ом ($allOperations): комментарии
+// про «оборачивание ключевых методов» раньше были неправдой — счётчики не
+// росли, и /admin/metrics показывал нули. Per-request атрибуция
+// (trackDbQuery/getDbStats) оставлена нулевой: требует AsyncLocalStorage;
+// глобальных счётчиков достаточно для анализа медленных маршрутов.
+const queryCount = { total: 0, totalMs: 0, slow: [] as Array<{ model: string; action: string; ms: number }> };
+
+const base = new PrismaClient({
   log: env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
 });
 
-// --- DB query timing for metrics ---
-// Prisma 5 не имеет $use в ESM, поэтому оборачиваем ключевые методы
-const queryCount = { total: 0, totalMs: 0, slow: [] as Array<{ model: string; action: string; ms: number }> };
+export const prisma = base.$extends({
+  query: {
+    $allOperations: async ({ model, operation, args, query }) => {
+      const start = performance.now();
+      const result = await query(args);
+      const ms = performance.now() - start;
+      queryCount.total++;
+      queryCount.totalMs += ms;
+      if (ms > 200 && queryCount.slow.length < 100) {
+        queryCount.slow.push({ model: model ?? 'raw', action: operation, ms: Math.round(ms * 100) / 100 });
+      }
+      return result;
+    },
+  },
+});
 
 // Экспортируем счётчик для метрик
 export function getDbMetrics() {

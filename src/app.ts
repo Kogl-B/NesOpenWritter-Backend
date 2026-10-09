@@ -71,9 +71,12 @@ export async function buildApp(): Promise<FastifyInstance> {
   // gzip для JSON-ответов: списки сущностей (главы/персонажи) уходят сотнями KB,
   // без сжатия это главный трафик на мобильных клиентах. Только gzip — brotli
   // на динамических ответах дороже по CPU при сопоставимом выигрыше.
+  // level 1: динамические ответы сжимаются на лету, дефолтный уровень 6 стоит
+  // ~2x CPU ради −5% размера — на событийном цикле под нагрузкой CPU дороже.
   await app.register(compress, {
     encodings: ['gzip', 'identity'],
     threshold: 512,
+    zlibOptions: { level: 1 },
   });
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(cors, {

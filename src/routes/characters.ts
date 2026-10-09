@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
+import { Prisma } from '@prisma/client';
+
 import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership, toJson } from '../lib/access.js';
 import {
@@ -28,17 +30,24 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
-      const characters = await prisma.character.findMany({
-        where: { projectId: req.params.projectId },
-        orderBy: { updatedAt: 'desc' },
-        // Лёгкий список для сайдбара: biography/summary/traits не тянем —
-        // полная запись приходит fetchOne при выборе персонажа.
-        select: {
-          id: true, projectId: true, name: true, shortName: true,
-          faction: true, status: true, portraitPath: true,
-          createdAt: true, updatedAt: true,
-        },
-      });
+      // Лёгкий список для сайдбара: biography/summary/traits не тянем —
+      // полная запись приходит fetchOne при выборе персонажа.
+      // $queryRaw: материализация 454 строк через движок Prisma ~17ms
+      // против ~2ms raw при идентичном SQL (см. chapters.ts).
+      const characters = await prisma.$queryRaw<
+        Array<{
+          id: string; projectId: string; name: string;
+          shortName: string | null; faction: string | null;
+          status: string | null; portraitPath: string | null;
+          createdAt: Date; updatedAt: Date;
+        }>
+      >(Prisma.sql`
+        SELECT id, "projectId", name, "shortName", faction, status,
+               "portraitPath", "createdAt", "updatedAt"
+        FROM characters
+        WHERE "projectId" = ${req.params.projectId}
+        ORDER BY "updatedAt" DESC
+      `);
       return { characters };
     },
   );
