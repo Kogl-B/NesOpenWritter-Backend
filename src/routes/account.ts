@@ -88,6 +88,7 @@ export async function getStorageUsedBytes(userId: string): Promise<number> {
 export interface UsageInfo {
   plan: string;
   planName: string;
+  aiBalanceCents: number;
   projects: { used: number; limit: number | null };
   storage: { usedBytes: number; limitBytes: number | null };
 }
@@ -98,9 +99,14 @@ export async function getUsageInfo(userId: string): Promise<UsageInfo> {
     prisma.project.count({ where: { ownerId: userId } }),
     getStorageUsedBytes(userId),
   ]);
+  const balance = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { aiBalanceCents: true },
+  });
   return {
     plan: tier.id,
     planName: tier.name,
+    aiBalanceCents: balance?.aiBalanceCents ?? 0,
     projects: { used: owned, limit: tier.projectLimit },
     storage: {
       usedBytes,
@@ -123,6 +129,7 @@ export const accountRoutes: FastifyPluginAsync = async (app) => {
         priceByn: t.priceByn,
         projectLimit: t.projectLimit,
         storageLimitMb: t.storageLimitMb,
+        summary: t.summary,
         features: t.features,
         prices: tierPrices(t.priceByn, bynUsd, bynRub),
       })),

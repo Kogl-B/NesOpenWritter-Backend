@@ -27,6 +27,8 @@ model User {
   twoFactorEnabled Boolean               @default(false)
   /// Тариф подписки (backend/src/lib/tiers.ts); null/мусор = 'test'
   plan             String?
+  /// Баланс на будущие ИИ-продукты, центы USD
+  aiBalanceCents   Int                   @default(0)
   createdAt        DateTime              @default(now())
   updatedAt        DateTime              @updatedAt
 
@@ -36,8 +38,29 @@ model User {
   twoFactors  TwoFactor[]
   integrations UserIntegration[]
   dictionaryEntries DictionaryEntry[]
+  cryptoPayments CryptoPayment[]
 
   @@map("users")
+}
+
+/// Счёт NOWPayments. Создаётся только когда криптооплата включена.
+model CryptoPayment {
+  id             String    @id @default(cuid())
+  userId         String
+  provider       String    @default("nowpayments")
+  purpose        String    @default("ai_balance")
+  amountUsdCents Int
+  status         String    @default("pending")
+  providerId     String?
+  invoiceUrl     String?
+  creditedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("crypto_payments")
 }
 
 /// Внешние интеграции пользователя (Google Drive и т.п.)

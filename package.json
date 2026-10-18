@@ -13,6 +13,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/lib/nowpayments.test.ts",
     "lint": "eslint src --max-warnings 0",
     "format": "prettier --write \"src/**/*.ts\"",
     "db:up": "docker compose up -d",
