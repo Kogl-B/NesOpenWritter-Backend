@@ -31,6 +31,7 @@ import { economyRoutes } from './routes/economy.js';
 import { featureRoutes } from './routes/features.js';
 import { wikiBookRoutes } from './routes/wikiBook.js';
 import { dictionaryRoutes } from './routes/dictionaries.js';
+import { calculatorRoutes } from './routes/calculators.js';
 import { initSentry, captureError } from './lib/sentry.js';
 import { recordRequest, getDbStats, requestContext } from './lib/metrics.js';
 import { getProjectAccess } from './lib/access.js';
@@ -156,6 +157,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(featureRoutes);
   await app.register(wikiBookRoutes);
   await app.register(dictionaryRoutes);
+  await app.register(calculatorRoutes);
 
   return app;
 }

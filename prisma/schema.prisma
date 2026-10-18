@@ -157,6 +157,8 @@ model Project {
   ExportJob           ExportJob[]
   ProjectCollaborator ProjectCollaborator[]
   dictionaryEntries   DictionaryEntry[]
+  calculators         Calculator[]
+  characterLedger     CharacterLedger[]
 
   @@index([ownerId])
   @@map("projects")
@@ -205,6 +207,8 @@ model Character {
 
   // items currently owned
   ownedItems Item[] @relation("ItemCurrentOwner")
+
+  ledger CharacterLedger[]
 
   @@index([projectId])
   @@map("characters")
@@ -463,6 +467,7 @@ model Chapter {
   event     TimelineEvent?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
   revisions ChapterRevision[]
   mentions  SceneMention[]
+  ledger    CharacterLedger[]
 
   @@index([projectId])
   @@index([parentId])
@@ -593,6 +598,49 @@ model WorldSnapshot {
   @@index([projectId])
   @@index([eventId])
   @@map("world_snapshots")
+}
+
+// Калькуляторы персонажа: деньги, шмотки и свои классы.
+// В тексте сцены пишутся как @Имя+300zm — запись попадает в журнал.
+model Calculator {
+  id        String   @id @default(cuid())
+  projectId String
+  /// Короткий код в тексте: zm, sm, меч
+  key       String
+  name      String
+  /// money | item — позже сюда же встанут системы вроде rpg
+  kind      String   @default("money")
+  unit      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  entries CharacterLedger[]
+
+  @@unique([projectId, key])
+  @@index([projectId])
+  @@map("calculators")
+}
+
+model CharacterLedger {
+  id           String   @id @default(cuid())
+  projectId    String
+  characterId  String
+  calculatorId String
+  chapterId    String?
+  delta        Float
+  note         String?
+  createdAt    DateTime @default(now())
+
+  project    Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  character  Character   @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  calculator Calculator  @relation(fields: [calculatorId], references: [id], onDelete: Cascade)
+  chapter    Chapter?    @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([characterId, calculatorId])
+  @@index([chapterId])
+  @@map("character_ledger")
 }
 
 // v1.2 — Вики проекта
