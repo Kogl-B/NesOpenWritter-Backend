@@ -230,6 +230,44 @@ export async function featureRoutes(app: FastifyInstance) {
     },
   );
 
+  app.patch<{ Params: { projectId: string; pinId: string } }>(
+    '/api/projects/:projectId/investigation/pins/:pinId',
+    async (req, reply) => {
+      if (!(await checkProject(req, reply))) return;
+      const input = z.object({
+        x: z.number().optional(),
+        y: z.number().optional(),
+        label: z.string().trim().min(1).max(200).optional(),
+        note: z.string().max(2000).nullable().optional(),
+        color: z.string().max(20).optional(),
+        entityType: z.string().max(40).nullable().optional(),
+        entityId: z.string().nullable().optional(),
+      }).parse(req.body);
+      const existing = await prisma.investigationPin.findFirst({
+        where: { id: req.params.pinId, projectId: req.params.projectId },
+        select: { id: true },
+      });
+      if (!existing) return reply.status(404).send({ error: 'Пин не найден' });
+      const pin = await prisma.investigationPin.update({
+        where: { id: existing.id },
+        data: input,
+      });
+      return { pin };
+    },
+  );
+
+  app.delete<{ Params: { projectId: string; threadId: string } }>(
+    '/api/projects/:projectId/investigation/threads/:threadId',
+    async (req, reply) => {
+      if (!(await checkProject(req, reply))) return;
+      const result = await prisma.investigationThread.deleteMany({
+        where: { id: req.params.threadId, projectId: req.params.projectId },
+      });
+      if (result.count === 0) return reply.status(404).send({ error: 'Нить не найдена' });
+      return reply.status(204).send();
+    },
+  );
+
   app.delete<{ Params: { projectId: string; pinId: string } }>(
     '/api/projects/:projectId/investigation/pins/:pinId',
     async (req, reply) => {

@@ -331,6 +331,111 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  // Хронология персонажа: главы, где он упомянут, и события, в которых участвует.
+  app.get<{ Params: CharacterParam }>(
+    '/api/projects/:projectId/characters/:characterId/storyline',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const character = await prisma.character.findFirst({
+        where: { id: req.params.characterId, projectId: req.params.projectId },
+        select: { id: true, status: true, dateOfDeath: true },
+      });
+      if (!character) return reply.status(404).send({ error: 'Character not found' });
+
+      const [mentions, links] = await Promise.all([
+        prisma.sceneMention.findMany({
+          where: {
+            entityType: 'character',
+            entityId: character.id,
+            scene: { projectId: req.params.projectId },
+          },
+          include: {
+            scene: {
+              select: {
+                id: true,
+                title: true,
+                kind: true,
+                orderIndex: true,
+                parent: { select: { id: true, title: true, kind: true, orderIndex: true } },
+              },
+            },
+          },
+        }),
+        prisma.eventCharacter.findMany({
+          where: { characterId: character.id, event: { projectId: req.params.projectId } },
+          include: {
+            event: { select: { id: true, name: true, at: true, atNumeric: true } },
+          },
+        }),
+      ]);
+
+      const chapters = new Map<string, { id: string; title: string; order: number; scenes: string[] }>();
+      for (const mention of mentions) {
+        const scene = mention.scene;
+        const chapter = scene.parent?.kind === 'chapter' ? scene.parent : scene;
+        const hit = chapters.get(chapter.id) ?? {
+          id: chapter.id,
+          title: chapter.title,
+          order: chapter.orderIndex,
+          scenes: [],
+        };
+        if (scene.id !== chapter.id && !hit.scenes.includes(scene.title)) hit.scenes.push(scene.title);
+        chapters.set(chapter.id, hit);
+      }
+      const ordered = [...chapters.values()].sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, 'ru'));
+      const beats: Array<{
+        id: string;
+        kind: 'appear' | 'present' | 'death' | 'event';
+        title: string;
+        detail: string | null;
+        at: string | null;
+        order: number;
+      }> = ordered.map((chapter, index) => {
+        const diedHere = character.status === 'dead' && index === ordered.length - 1;
+        const kind = index === 0 ? 'appear' : diedHere ? 'death' : 'present';
+        const title = kind === 'appear'
+          ? `Появился в «${chapter.title}»`
+          : kind === 'death'
+            ? `Погиб в «${chapter.title}»`
+            : `Был в «${chapter.title}»`;
+        return {
+          id: `chapter:${chapter.id}`,
+          kind,
+          title,
+          detail: [chapter.scenes.join(', '), diedHere ? character.dateOfDeath : null].filter(Boolean).join(' · ') || null,
+          at: null,
+          order: chapter.order,
+        };
+      });
+
+      if (character.status === 'dead' && !beats.some((b) => b.kind === 'death')) {
+        beats.push({
+          id: 'death',
+          kind: 'death',
+          title: 'Погиб',
+          detail: character.dateOfDeath,
+          at: character.dateOfDeath,
+          order: 1_000_000,
+        });
+      }
+
+      for (const link of links) {
+        beats.push({
+          id: `event:${link.event.id}`,
+          kind: 'event',
+          title: link.event.name,
+          detail: link.role && link.role !== 'participant' ? link.role : null,
+          at: link.event.at,
+          order: (link.event.atNumeric ?? 500_000) + 0.5,
+        });
+      }
+      beats.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, 'ru'));
+      return { beats };
+    },
+  );
+
   // ----- Character positions ----------------------------------------------
 
   app.get<{ Params: ProjectParam }>(
