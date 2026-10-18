@@ -29,16 +29,15 @@ export const characterCreateSchema = z.object({
   faction: z.string().max(200).nullish(),
   gender: z.enum(['male', 'female', 'other']).nullish(),
   status: characterStatusEnum.optional(),
-  // «год/эпоха» — свободный текст, но без мусора вроде «abc»
   dateOfBirth: z
     .string()
-    .max(50)
-    .refine((v) => /[0-9а-яёА-ЯЁ]/i.test(v), 'Дата рождения: используйте цифры или кириллицу')
+    .trim()
+    .refine((v) => v === '' || /^\d{2}:\d{2}:\d{4}$/.test(v), 'Дата рождения: формат ДД:ММ:ГГГГ')
     .nullish(),
   dateOfDeath: z
     .string()
-    .max(50)
-    .refine((v) => /[0-9а-яёА-ЯЁ]/i.test(v), 'Дата смерти: используйте цифры или кириллицу')
+    .trim()
+    .refine((v) => v === '' || /^\d{2}:\d{2}:\d{4}$/.test(v), 'Дата смерти: формат ДД:ММ:ГГГГ')
     .nullish(),
   traits: z.array(z.string()).optional(),
   abilities: z.array(z.string()).optional(),
@@ -51,6 +50,11 @@ export const dictionaryCreateSchema = z.object({
   kind: z.enum(['faction', 'ability']),
   value: z.string().trim().min(1).max(80),
   /// null — словарь на все проекты пользователя
+  projectId: z.string().min(1).nullish(),
+});
+
+export const dictionaryUpdateSchema = z.object({
+  value: z.string().trim().min(1).max(80),
   projectId: z.string().min(1).nullish(),
 });
 
