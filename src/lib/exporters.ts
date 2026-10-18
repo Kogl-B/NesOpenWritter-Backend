@@ -230,6 +230,41 @@ const CRC_TABLE = (() => {
   return table;
 })();
 
+/** FictionBook 2 — плоский список глав и сцен в порядке рукописи. */
+export function generateFb2(data: ExportData): Buffer {
+  const chapters = data.chapters.filter((c) => c.kind === 'scene' || c.wordCount > 0);
+  const sections = chapters.map((c) => {
+    const paras = tipapToText(c.content)
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => `<p>${esc(line)}</p>`)
+      .join('');
+    return `<section><title><p>${esc(c.title)}</p></title>${paras || '<empty-line/>'}</section>`;
+  }).join('');
+  const today = new Date().toISOString().slice(0, 10);
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+<description>
+<title-info>
+<genre>prose</genre>
+<author><first-name></first-name><last-name>Автор</last-name></author>
+<book-title>${esc(data.projectName)}</book-title>
+<lang>ru</lang>
+</title-info>
+<document-info>
+<author><nickname>OpenWritter</nickname></author>
+<program-used>OpenWritter</program-used>
+<date value="${today}">${today}</date>
+<id>openwritter-${Date.now()}</id>
+<version>1.0</version>
+</document-info>
+</description>
+<body>${sections || '<section><p></p></section>'}</body>
+</FictionBook>`;
+  return Buffer.from(xml, 'utf8');
+}
+
 function crc32(buf: Buffer): number {
   let crc = 0xffffffff;
   for (let i = 0; i < buf.length; i++) {
