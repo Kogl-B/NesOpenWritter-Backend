@@ -27,6 +27,7 @@ export const characterCreateSchema = z.object({
   summary: z.string().max(2000).nullish(),
   biography: z.string().nullish(),
   faction: z.string().max(200).nullish(),
+  gender: z.enum(['male', 'female', 'other']).nullish(),
   status: characterStatusEnum.optional(),
   // «год/эпоха» — свободный текст, но без мусора вроде «abc»
   dateOfBirth: z
@@ -45,6 +46,13 @@ export const characterCreateSchema = z.object({
 });
 
 export const characterUpdateSchema = characterCreateSchema.partial();
+
+export const dictionaryCreateSchema = z.object({
+  kind: z.enum(['faction', 'ability']),
+  value: z.string().trim().min(1).max(80),
+  /// null — словарь на все проекты пользователя
+  projectId: z.string().min(1).nullish(),
+});
 
 // ----- CharacterRelation ----------------------------------------------------
 

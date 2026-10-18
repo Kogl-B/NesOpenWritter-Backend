@@ -38,11 +38,12 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
         Array<{
           id: string; name: string;
           shortName: string | null; faction: string | null;
+          gender: string | null;
           status: string | null; portraitPath: string | null;
           updatedAt: Date;
         }>
       >(Prisma.sql`
-        SELECT id, name, "shortName", faction, status,
+        SELECT id, name, "shortName", faction, gender, status,
                "portraitPath", "updatedAt"
         FROM characters
         WHERE "projectId" = ${req.params.projectId}
@@ -68,6 +69,7 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
           summary: input.summary ?? null,
           biography: input.biography ?? null,
           faction: input.faction ?? null,
+          gender: input.gender ?? null,
           status: input.status ?? 'alive',
           dateOfBirth: input.dateOfBirth ?? null,
           dateOfDeath: input.dateOfDeath ?? null,
@@ -110,6 +112,7 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
           ...(input.summary !== undefined && { summary: input.summary }),
           ...(input.biography !== undefined && { biography: input.biography }),
           ...(input.faction !== undefined && { faction: input.faction }),
+          ...(input.gender !== undefined && { gender: input.gender }),
           ...(input.status !== undefined && { status: input.status }),
           ...(input.dateOfBirth !== undefined && { dateOfBirth: input.dateOfBirth }),
           ...(input.dateOfDeath !== undefined && { dateOfDeath: input.dateOfDeath }),
