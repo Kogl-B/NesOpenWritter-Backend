@@ -24,5 +24,53 @@ services:
       timeout: 3s
       retries: 10
 
+  # Готовый блог авторов (WriteFreely). Свой движок не пишем.
+  writefreely:
+    image: writeas/writefreely:latest
+    container_name: nesopenwritter_blog
+    user: "0:0"
+    restart: unless-stopped
+    ports:
+      - "8088:8080"
+    volumes:
+      - ./blog/config.ini:/go/config.ini:ro
+      - nesopenwritter_blog:/data
+
+  # Готовый форум обсуждений (Flarum). Свой форум не пишем.
+  forum-db:
+    image: mariadb:11
+    container_name: nesopenwritter_forum_db
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: flarum
+      MARIADB_USER: flarum
+      MARIADB_PASSWORD: flarum
+      MARIADB_RANDOM_ROOT_PASSWORD: "yes"
+    volumes:
+      - nesopenwritter_forum_db:/var/lib/mysql
+
+  flarum:
+    image: mondedie/flarum:stable
+    container_name: nesopenwritter_forum
+    restart: unless-stopped
+    depends_on:
+      - forum-db
+    ports:
+      - "8089:8888"
+    environment:
+      DEBUG: "false"
+      FORUM_URL: http://localhost:8089
+      DB_HOST: forum-db
+      DB_NAME: flarum
+      DB_USER: flarum
+      DB_PASS: flarum
+      DB_PREF: flarum_
+      FLARUM_TITLE: Обсуждения
+      FLARUM_ADMIN_USER: author
+      FLARUM_ADMIN_PASS: forum-local
+      FLARUM_ADMIN_MAIL: e2e@test.local
+
 volumes:
   nesopenwritter_pgdata:
+  nesopenwritter_blog:
+  nesopenwritter_forum_db:

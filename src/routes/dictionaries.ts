@@ -40,9 +40,24 @@ export const dictionaryRoutes: FastifyPluginAsync = async (app) => {
     const existing = await prisma.dictionaryEntry.findFirst({
       where: { userId, projectId, kind: input.kind, value: input.value },
     });
-    if (existing) return { entry: existing };
+    if (existing) {
+      if (input.details) {
+        const entry = await prisma.dictionaryEntry.update({
+          where: { id: existing.id },
+          data: { details: input.details },
+        });
+        return { entry };
+      }
+      return { entry: existing };
+    }
     const entry = await prisma.dictionaryEntry.create({
-      data: { userId, projectId, kind: input.kind, value: input.value },
+      data: {
+        userId,
+        projectId,
+        kind: input.kind,
+        value: input.value,
+        details: input.details ?? {},
+      },
     });
     return reply.status(201).send({ entry });
   });
@@ -62,7 +77,11 @@ export const dictionaryRoutes: FastifyPluginAsync = async (app) => {
     }
     const updated = await prisma.dictionaryEntry.update({
       where: { id: entry.id },
-      data: { value: input.value, projectId },
+      data: {
+        value: input.value,
+        projectId,
+        ...(input.details !== undefined && { details: input.details }),
+      },
     });
     return { entry: updated };
   });

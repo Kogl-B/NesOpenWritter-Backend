@@ -39,8 +39,149 @@ model User {
   integrations UserIntegration[]
   dictionaryEntries DictionaryEntry[]
   cryptoPayments CryptoPayment[]
+  blogPosts    BlogPost[]
+  authorLevels AuthorLevel[]
+  followsOut   AuthorFollow[] @relation("Follower")
+  followsIn    AuthorFollow[] @relation("AuthorFollowed")
+  subscriptionsOut AuthorSubscription[] @relation("Subscriber")
+  subscriptionsIn  AuthorSubscription[] @relation("SubscribedAuthor")
+  blogComments BlogComment[]
+  blogLikes    BlogLike[]
+  blogReports  BlogReport[]
+  blogDonations BlogDonation[]
 
   @@map("users")
+}
+
+model AuthorLevel {
+  id          String   @id @default(cuid())
+  authorId    String
+  title       String
+  description String   @default("")
+  /// Цена в рублях за месяц
+  priceRub    Int
+  avatar      String   @default("")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  author        User                 @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  posts         BlogPost[]
+  subscriptions AuthorSubscription[]
+
+  @@index([authorId])
+  @@map("author_levels")
+}
+
+model AuthorFollow {
+  userId    String
+  authorId  String
+  createdAt DateTime @default(now())
+
+  user   User @relation("Follower", fields: [userId], references: [id], onDelete: Cascade)
+  author User @relation("AuthorFollowed", fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@id([userId, authorId])
+  @@index([authorId])
+  @@map("author_follows")
+}
+
+model AuthorSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  authorId  String
+  levelId   String
+  createdAt DateTime @default(now())
+
+  user   User        @relation("Subscriber", fields: [userId], references: [id], onDelete: Cascade)
+  author User        @relation("SubscribedAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  level  AuthorLevel @relation(fields: [levelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, authorId])
+  @@index([authorId])
+  @@map("author_subscriptions")
+}
+
+model BlogPost {
+  id        String   @id @default(cuid())
+  authorId  String
+  title     String
+  body      String
+  topic     String   @default("")
+  tags      String[] @default([])
+  views     Int      @default(0)
+  published Boolean  @default(false)
+  /// Уровень подписки, без которого текст закрыт. Пусто — запись для всех.
+  levelId   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  author    User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  level     AuthorLevel?  @relation(fields: [levelId], references: [id], onDelete: SetNull)
+  comments  BlogComment[]
+  likes     BlogLike[]
+  reports   BlogReport[]
+  donations BlogDonation[]
+
+  @@index([authorId, updatedAt])
+  @@index([published, createdAt])
+  @@map("blog_posts")
+}
+
+model BlogComment {
+  id         String   @id @default(cuid())
+  postId     String
+  userId     String
+  authorName String   @default("")
+  body       String
+  createdAt  DateTime @default(now())
+
+  post BlogPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([postId, createdAt])
+  @@map("blog_comments")
+}
+
+model BlogLike {
+  userId    String
+  postId    String
+  createdAt DateTime @default(now())
+
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post BlogPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@id([userId, postId])
+  @@index([postId])
+  @@map("blog_likes")
+}
+
+model BlogReport {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  note      String   @default("")
+  createdAt DateTime @default(now())
+
+  post BlogPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([postId])
+  @@map("blog_reports")
+}
+
+model BlogDonation {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  amountRub Int
+  note      String   @default("")
+  createdAt DateTime @default(now())
+
+  post BlogPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([postId])
+  @@map("blog_donations")
 }
 
 /// Счёт NOWPayments. Создаётся только когда криптооплата включена.
@@ -237,15 +378,17 @@ model Character {
   @@map("characters")
 }
 
-/// Словари пользователя: фракции и способности. projectId пустой — словарь
-/// общий для всех проектов этого пользователя.
+/// Словари пользователя: фракции, способности и родословные. projectId пустой —
+/// словарь общий для всех проектов этого пользователя.
 model DictionaryEntry {
   id        String   @id @default(cuid())
   userId    String
   projectId String?
-  /// faction | ability
+  /// faction | ability | lineage
   kind      String
   value     String
+  /// Карточка фракции, способности или рода.
+  details   Json     @default("{}")
   createdAt DateTime @default(now())
 
   user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -875,4 +1018,58 @@ model ProjectCollaborator {
 
   @@unique([projectId, userId])
   @@map("project_collaborators")
+}
+
+/// Сообщение читателя автору: выделенный фрагмент и возможная опечатка.
+model ReaderReport {
+  id        String   @id @default(cuid())
+  projectId String
+  chapterId String
+  authorId  String
+  quote     String
+  note      String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([authorId, createdAt])
+  @@map("reader_reports")
+}
+
+/// Лайк, избранное, полка чтения и отметка «сейчас читает».
+model BookReaction {
+  userId     String
+  projectId  String
+  liked      Boolean   @default(false)
+  disliked   Boolean   @default(false)
+  favorite   Boolean   @default(false)
+  /// reading | later | done | skip | пусто
+  shelf      String    @default("")
+  lastReadAt DateTime?
+  updatedAt  DateTime  @updatedAt
+
+  @@id([userId, projectId])
+  @@index([projectId, liked])
+  @@index([projectId, lastReadAt])
+  @@map("book_reactions")
+}
+
+model BookView {
+  id        String   @id @default(cuid())
+  projectId String
+  createdAt DateTime @default(now())
+
+  @@index([projectId, createdAt])
+  @@map("book_views")
+}
+
+model BookComment {
+  id         String   @id @default(cuid())
+  projectId  String
+  userId     String
+  authorName String   @default("")
+  body       String
+  chapterId  String   @default("")
+  createdAt  DateTime @default(now())
+
+  @@index([projectId, createdAt])
+  @@map("book_comments")
 }

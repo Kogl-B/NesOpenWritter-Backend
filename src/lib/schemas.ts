@@ -46,16 +46,23 @@ export const characterCreateSchema = z.object({
 
 export const characterUpdateSchema = characterCreateSchema.partial();
 
+const dictionaryDetailsSchema = z.record(
+  z.string().max(40),
+  z.union([z.string().max(8000), z.array(z.string().max(200)).max(40)]),
+).optional();
+
 export const dictionaryCreateSchema = z.object({
-  kind: z.enum(['faction', 'ability']),
+  kind: z.enum(['faction', 'ability', 'lineage']),
   value: z.string().trim().min(1).max(80),
   /// null — словарь на все проекты пользователя
   projectId: z.string().min(1).nullish(),
+  details: dictionaryDetailsSchema,
 });
 
 export const dictionaryUpdateSchema = z.object({
   value: z.string().trim().min(1).max(80),
   projectId: z.string().min(1).nullish(),
+  details: dictionaryDetailsSchema,
 });
 
 // ----- CharacterRelation ----------------------------------------------------
@@ -335,6 +342,12 @@ export const chapterRevisionCreateSchema = z.object({
 
 export const userSettingsUpdateSchema = z.object({
   settings: jsonObject,
+});
+
+export const readerReportCreateSchema = z.object({
+  chapterId: z.string().min(1),
+  quote: z.string().trim().min(1).max(280),
+  note: z.string().trim().max(500).optional(),
 });
 
 // ----- Search (Этап 6) ------------------------------------------------------

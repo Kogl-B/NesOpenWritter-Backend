@@ -41,10 +41,11 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
           gender: string | null;
           status: string | null; portraitPath: string | null;
           updatedAt: Date;
+          metadata: unknown;
         }>
       >(Prisma.sql`
         SELECT id, name, "shortName", faction, gender, status,
-               "portraitPath", "updatedAt"
+               "portraitPath", "updatedAt", metadata
         FROM characters
         WHERE "projectId" = ${req.params.projectId}
         ORDER BY "updatedAt" DESC

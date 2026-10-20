@@ -14,7 +14,7 @@ const keySchema = z.string().trim().min(1).max(16).regex(/^[\p{L}\p{N}_]+$/u, 'Ð
 const createSchema = z.object({
   key: keySchema,
   name: z.string().trim().min(1).max(80),
-  kind: z.enum(['money', 'item']).default('money'),
+  kind: z.enum(['money', 'item', 'meter']).default('money'),
   unit: z.string().trim().max(16).optional().nullable(),
 });
 
