@@ -279,16 +279,18 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
 
   app.get('/api/me/blog', async (req) => {
     app.requireAuth(req);
-    const [posts, levels] = await Promise.all([
+    const [posts, levels, likes] = await Promise.all([
       prisma.blogPost.findMany({
         where: { authorId: req.user!.id },
         include: postInclude,
         orderBy: { updatedAt: 'desc' },
       }),
       prisma.authorLevel.findMany({ where: { authorId: req.user!.id }, orderBy: { priceRub: 'asc' } }),
+      prisma.blogLike.findMany({ where: { userId: req.user!.id }, select: { postId: true } }),
     ]);
+    const liked = new Set(likes.map((row) => row.postId));
     return {
-      posts: posts.map((post) => card(post)),
+      posts: posts.map((post) => card(post, { liked: liked.has(post.id) })),
       levels: levels.map((level) => ({
         id: level.id,
         title: level.title,

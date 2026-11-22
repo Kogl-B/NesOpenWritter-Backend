@@ -27,6 +27,8 @@ model User {
   twoFactorEnabled Boolean               @default(false)
   /// Тариф подписки (backend/src/lib/tiers.ts); null/мусор = 'test'
   plan             String?
+  /// Статус аккаунта: test | regular | admin. Не путать с тарифом подписки.
+  accountStatus    String                @default("test")
   /// Баланс на будущие ИИ-продукты, центы USD
   aiBalanceCents   Int                   @default(0)
   createdAt        DateTime              @default(now())
@@ -49,6 +51,11 @@ model User {
   blogLikes    BlogLike[]
   blogReports  BlogReport[]
   blogDonations BlogDonation[]
+  aiUsages     AiUsage[]
+  errorReports AppErrorReport[]
+  readProgress ReadProgress[]
+  bookSubscriptions BookSubscription[]
+  chapterRevisions ChapterRevision[]
 
   @@map("users")
 }
@@ -192,10 +199,13 @@ model CryptoPayment {
   purpose        String    @default("ai_balance")
   amountUsdCents Int
   status         String    @default("pending")
-  providerId     String?
-  invoiceUrl     String?
-  creditedAt     DateTime?
-  createdAt      DateTime  @default(now())
+  providerId       String?
+  invoiceUrl       String?
+  /// Сколько центов USD уже зачислено. Частичная оплата меньше суммы счёта.
+  creditedUsdCents Int       @default(0)
+  creditedAt       DateTime?
+  reversedAt       DateTime?
+  createdAt        DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -323,6 +333,7 @@ model Project {
   dictionaryEntries   DictionaryEntry[]
   calculators         Calculator[]
   characterLedger     CharacterLedger[]
+  bookSubscriptions   BookSubscription[]
 
   @@index([ownerId])
   @@map("projects")
@@ -350,6 +361,10 @@ model Character {
   traits       String[]         @default([])
   abilities    String[]         @default([])
   metadata     Json             @default("{}")
+  /// Карточка собрана инструментом «создание ИИ».
+  aiCreated    Boolean          @default(false)
+  /// Карточку смотрел инструмент «проверка ИИ».
+  aiReviewed   Boolean          @default(false)
   createdAt    DateTime         @default(now())
   updatedAt    DateTime         @updatedAt
 
@@ -453,6 +468,10 @@ model Item {
   currentOwnerId    String?
   currentLocationId String?
   metadata          Json     @default("{}")
+  /// Карточка собрана инструментом «создание ИИ».
+  aiCreated         Boolean  @default(false)
+  /// Карточку смотрел инструмент «проверка ИИ».
+  aiReviewed        Boolean  @default(false)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -505,6 +524,10 @@ model Location {
   coordY           Float?
   description      String?
   metadata         Json         @default("{}")
+  /// Карточка собрана инструментом «создание ИИ».
+  aiCreated        Boolean      @default(false)
+  /// Карточку смотрел инструмент «проверка ИИ».
+  aiReviewed       Boolean      @default(false)
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
 
@@ -621,6 +644,12 @@ model Chapter {
   content    Json     @default("{}")
   orderIndex Int      @default(0)
   wordCount  Int      @default(0)
+  /// Длина видимого текста, без разметки. Считается при сохранении главы.
+  charCount  Int      @default(0)
+  /// Текст главы вставлен инструментом «создание ИИ».
+  aiCreated  Boolean  @default(false)
+  /// Текст смотрел инструмент «проверка ИИ».
+  aiReviewed Boolean  @default(false)
   eventId    String?
   locationId String?
   metadata   Json     @default("{}")
@@ -634,6 +663,7 @@ model Chapter {
   revisions ChapterRevision[]
   mentions  SceneMention[]
   ledger    CharacterLedger[]
+  reads     ReadProgress[]
 
   @@index([projectId])
   @@index([parentId])
@@ -723,14 +753,18 @@ model MapDrawing {
 model ChapterRevision {
   id        String   @id @default(cuid())
   chapterId String
+  /// Аккаунт, который сохранил эту версию. Пусто у записей до мультидоступа.
+  authorId  String?
   label     String?
   content   Json     @default("{}")
   wordCount Int      @default(0)
   createdAt DateTime @default(now())
 
   chapter Chapter @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  author  User?   @relation(fields: [authorId], references: [id], onDelete: SetNull)
 
   @@index([chapterId])
+  @@index([authorId])
   @@map("chapter_revisions")
 }
 
@@ -1052,6 +1086,20 @@ model BookReaction {
   @@map("book_reactions")
 }
 
+/// Отметка «подписан на эту книгу». Деньги не списывает.
+model BookSubscription {
+  userId    String
+  projectId String
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([userId, projectId])
+  @@index([projectId, createdAt])
+  @@map("book_subscriptions")
+}
+
 model BookView {
   id        String   @id @default(cuid())
   projectId String
@@ -1059,6 +1107,73 @@ model BookView {
 
   @@index([projectId, createdAt])
   @@map("book_views")
+}
+
+/// Ключ штатного ИИ. Секрет хранится шифром, в ответах API его нет.
+model AiProvider {
+  id                String   @id @default(cuid())
+  provider          String   @unique
+  label             String
+  keyCipher         String   @default("")
+  keyHint           String   @default("")
+  baseUrl           String   @default("https://api.deepseek.com")
+  model             String   @default("deepseek-flash")
+  enabled           Boolean  @default(false)
+  /// Внепиковая цена, миллионные доли доллара за 1 млн токенов.
+  inputMissUsdPerM  Int      @default(150000)
+  inputHitUsdPerM   Int      @default(3000)
+  outputUsdPerM     Int      @default(600000)
+  /// Во сколько раз дороже пиковые часы DeepSeek.
+  peakMultiplier    Int      @default(2)
+  /// Квота токенов на 30 дней. 0 — без потолка.
+  testQuota         Int      @default(30000)
+  regularQuota      Int      @default(300000)
+  adminQuota        Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("ai_providers")
+}
+
+/// Один вызов штатного ИИ. Аккаунт — userId, книга — projectId, если вызов был из проекта.
+model AiUsage {
+  id                String   @id @default(cuid())
+  userId            String
+  projectId         String?
+  provider          String
+  model             String
+  purpose           String
+  promptTokens      Int
+  completionTokens  Int
+  cacheHitTokens    Int      @default(0)
+  cacheMissTokens   Int      @default(0)
+  totalTokens       Int
+  costUsdMicros     Int
+  peak              Boolean  @default(false)
+  createdAt         DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([createdAt])
+  @@map("ai_usages")
+}
+
+/// Сообщение об ошибке, которое пользователь отправил из шапки.
+model AppErrorReport {
+  id        String   @id @default(cuid())
+  userId    String
+  message   String
+  page      String   @default("")
+  status    String   @default("new")
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([userId])
+  @@map("app_error_reports")
 }
 
 model BookComment {
@@ -1072,4 +1187,47 @@ model BookComment {
 
   @@index([projectId, createdAt])
   @@map("book_comments")
+}
+
+/// Суточный счётчик. Одна строка на день, вид и корзину — без журнала визитов.
+model DailyMetric {
+  day    String
+  kind   String
+  bucket String
+  total  Int    @default(0)
+
+  @@id([day, kind, bucket])
+  @@map("daily_metrics")
+}
+
+/// Сколько человек дочитал главу. Хранится максимум, повторный заход строку не плодит.
+model ReadProgress {
+  userId    String
+  projectId String
+  chapterId String
+  /// 0–100, максимальная доля прокрутки.
+  percent   Int      @default(0)
+  charsSeen Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chapter Chapter @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  @@id([userId, chapterId])
+  @@index([projectId])
+  @@index([userId, updatedAt])
+  @@map("read_progress")
+}
+
+/// Встроенный блок для бесплатного тарифа и гостей.
+model HouseAd {
+  id       String  @id
+  title    String
+  body     String
+  href     String
+  enabled  Boolean @default(true)
+  audience String  @default("free")
+  sort     Int     @default(0)
+
+  @@map("house_ads")
 }

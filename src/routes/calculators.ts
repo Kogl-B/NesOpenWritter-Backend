@@ -80,6 +80,34 @@ export const calculatorRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  app.patch<{ Params: { projectId: string; calculatorId: string } }>(
+    '/api/projects/:projectId/calculators/:calculatorId',
+    async (req, reply) => {
+      const role = await getProjectAccess(req.params.projectId, req.user!.id);
+      if (!role) return reply.status(404).send({ error: 'Project not found' });
+      if (role === 'viewer') return reply.status(403).send({ error: 'Недостаточно прав' });
+      const input = z.object({
+        name: z.string().trim().min(1).max(80).optional(),
+        unit: z.string().trim().max(16).nullable().optional(),
+      }).parse(req.body);
+      if (input.name === undefined && input.unit === undefined) {
+        return reply.status(400).send({ error: 'Нечего сохранять' });
+      }
+      const result = await prisma.calculator.updateMany({
+        where: { id: req.params.calculatorId, projectId: req.params.projectId },
+        data: {
+          ...(input.name !== undefined && { name: input.name }),
+          ...(input.unit !== undefined && { unit: input.unit }),
+        },
+      });
+      if (result.count === 0) return reply.status(404).send({ error: 'Калькулятор не найден' });
+      const calculator = await prisma.calculator.findFirst({
+        where: { id: req.params.calculatorId, projectId: req.params.projectId },
+      });
+      return { calculator };
+    },
+  );
+
   app.delete<{ Params: { projectId: string; calculatorId: string } }>(
     '/api/projects/:projectId/calculators/:calculatorId',
     async (req, reply) => {

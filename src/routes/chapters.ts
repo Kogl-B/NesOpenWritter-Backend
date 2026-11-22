@@ -4,6 +4,8 @@ import { Prisma } from '@prisma/client';
 
 import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership, toJson } from '../lib/access.js';
+import { tierIncludesRevisionHistory } from '../lib/tiers.js';
+import { countPlainText } from '../lib/plainText.js';
 import {
   chapterCreateSchema,
   chapterUpdateSchema,
@@ -14,6 +16,24 @@ import {
 } from '../lib/schemas.js';
 
 type ProjectParam = { projectId: string };
+
+const revisionListSelect = {
+  id: true,
+  chapterId: true,
+  label: true,
+  wordCount: true,
+  createdAt: true,
+  author: { select: { id: true, name: true, email: true } },
+} as const;
+
+/** История версий смотрит тариф владельца проекта, а не тариф соавтора. */
+async function ownerHasRevisionHistory(projectId: string): Promise<boolean> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { owner: { select: { plan: true } } },
+  });
+  return tierIncludesRevisionHistory(project?.owner.plan);
+}
 
 /** FNV-1a: ~1ms на 200KB — дешёвый weak-etag для 304-условных ответов. */
 function hashBody(s: string): string {
@@ -112,6 +132,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
           content: toJson(input.content),
           orderIndex: input.orderIndex ?? 0,
           wordCount: input.wordCount ?? 0,
+          charCount: countPlainText(input.content).chars,
           eventId: input.eventId ?? null,
           locationId: input.locationId ?? null,
           metadata: toJson(input.metadata),
@@ -160,6 +181,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
           ...(input.title !== undefined && { title: input.title }),
           ...(input.summary !== undefined && { summary: input.summary }),
           ...(input.content !== undefined && { content: toJson(input.content) }),
+          ...(input.content !== undefined && { charCount: countPlainText(input.content).chars }),
           ...(input.orderIndex !== undefined && { orderIndex: input.orderIndex }),
           ...(input.wordCount !== undefined && { wordCount: input.wordCount }),
           ...(input.eventId !== undefined && { eventId: input.eventId }),
@@ -244,6 +266,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
             prisma.chapterRevision.create({
               data: {
                 chapterId: req.params.chapterId,
+                authorId: req.user!.id,
                 label,
                 content: (content?.content ?? {}) as object,
                 wordCount: beforeWords,
@@ -267,11 +290,13 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       // Запись + ответ одним UPDATE ... RETURNING: отдельный findUnique
       // после updateMany добавлял ~4ms на каждый автосейв.
       const json = JSON.stringify(input.content);
+      const chars = countPlainText(input.content).chars;
       const updated = await prisma.$queryRaw<
         Array<{ id: string; wordCount: number; updatedAt: Date }>
       >(Prisma.sql`
         UPDATE chapters
         SET content = ${json}::jsonb,
+            "charCount" = ${chars},
             "updatedAt" = now()
             ${input.wordCount !== undefined ? Prisma.sql`, "wordCount" = ${input.wordCount}` : Prisma.empty}
         WHERE id = ${req.params.chapterId} AND "projectId" = ${req.params.projectId}
@@ -409,6 +434,9 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
+      if (!(await ownerHasRevisionHistory(req.params.projectId))) {
+        return reply.status(402).send({ error: 'История версий доступна на платном тарифе владельца проекта.' });
+      }
       const chapter = await prisma.chapter.findFirst({
         where: { id: req.params.chapterId, projectId: req.params.projectId },
         select: { id: true },
@@ -420,13 +448,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         // Лимит: за месяцы работы автосейв накапливает сотни ревизий на
         // сцену — тянуть весь список в историю незачем.
         take: 100,
-        select: {
-          id: true,
-          chapterId: true,
-          label: true,
-          wordCount: true,
-          createdAt: true,
-        },
+        select: revisionListSelect,
       });
       return { revisions };
     },
@@ -439,6 +461,9 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
+      if (!(await ownerHasRevisionHistory(req.params.projectId))) {
+        return reply.status(402).send({ error: 'История версий доступна на платном тарифе владельца проекта.' });
+      }
       const chapter = await prisma.chapter.findFirst({
         where: { id: req.params.chapterId, projectId: req.params.projectId },
         select: { content: true, wordCount: true },
@@ -448,20 +473,14 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       const revision = await prisma.chapterRevision.create({
         data: {
           chapterId: req.params.chapterId,
+          authorId: req.user!.id,
           label: input.label ?? null,
           content: chapter.content as object,
           wordCount: chapter.wordCount,
         },
+        select: revisionListSelect,
       });
-      return reply.status(201).send({
-        revision: {
-          id: revision.id,
-          chapterId: revision.chapterId,
-          label: revision.label,
-          wordCount: revision.wordCount,
-          createdAt: revision.createdAt,
-        },
-      });
+      return reply.status(201).send({ revision });
     },
   );
 
@@ -470,6 +489,9 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
     async (req, reply) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
+      }
+      if (!(await ownerHasRevisionHistory(req.params.projectId))) {
+        return reply.status(402).send({ error: 'История версий доступна на платном тарифе владельца проекта.' });
       }
       const revision = await prisma.chapterRevision.findFirst({
         where: {
@@ -489,6 +511,9 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
     async (req, reply) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
+      }
+      if (!(await ownerHasRevisionHistory(req.params.projectId))) {
+        return reply.status(402).send({ error: 'История версий доступна на платном тарифе владельца проекта.' });
       }
       const revision = await prisma.chapterRevision.findFirst({
         where: {
@@ -514,6 +539,9 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
     async (req, reply) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
+      }
+      if (!(await ownerHasRevisionHistory(req.params.projectId))) {
+        return reply.status(402).send({ error: 'История версий доступна на платном тарифе владельца проекта.' });
       }
       // verify chain
       const ok = await prisma.chapterRevision.findFirst({

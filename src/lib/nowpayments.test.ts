@@ -3,6 +3,7 @@ import { createHmac } from 'node:crypto';
 import { describe, it } from 'node:test';
 import {
   buildInvoicePayload,
+  creditedCents,
   cryptoPaymentsEnabled,
   nowpaymentsSignatureValid,
 } from './nowpayments.js';
@@ -50,5 +51,17 @@ describe('nowpayments', () => {
     assert.equal(nowpaymentsSignatureValid({ b: 'x', a: 1 }, signature, 'other'), false);
     assert.equal(nowpaymentsSignatureValid({ b: 'x', a: 2 }, signature, secret), false);
     assert.equal(nowpaymentsSignatureValid({ b: 'x', a: 1 }, '', secret), false);
+    const spaced = '{"a": 1, "b": "x"}';
+    const spacedSig = createHmac('sha512', secret).update(spaced).digest('hex');
+    assert.equal(nowpaymentsSignatureValid({ b: 'x', a: 1 }, spacedSig, secret), true);
+  });
+
+  it('зачисляет весь счёт на finished и долю на partially_paid', () => {
+    assert.equal(creditedCents(1000, 'finished'), 1000);
+    assert.equal(creditedCents(1000, 'partially_paid', 0.5, 1), 500);
+    assert.equal(creditedCents(1000, 'partially_paid', 2, 1), 1000);
+    assert.equal(creditedCents(1000, 'partially_paid', 0, 1), 0);
+    assert.equal(creditedCents(1000, 'waiting'), null);
+    assert.equal(creditedCents(1000, 'failed'), null);
   });
 });

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { GENRES, expandGenre, genreName } from '../lib/genres.js';
 import { readerReportCreateSchema } from '../lib/schemas.js';
+import { scoreChapters } from '../lib/aiMarks.js';
 
 interface RawBook {
   id: string;
@@ -45,6 +46,7 @@ export interface BookCard {
   favorite: boolean;
   reading: boolean;
   shelf: '' | 'reading' | 'later' | 'done' | 'skip';
+  subscribed: boolean;
   cover: string;
   structure: 'chapters' | 'chapters-scenes';
 }
@@ -89,10 +91,13 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
   `;
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
-  const [views, mine] = await Promise.all([
+  const [views, mine, subs] = await Promise.all([
     prisma.bookView.groupBy({ by: ['projectId'], where: { projectId: { in: ids } }, _count: { _all: true } }),
     userId
       ? prisma.bookReaction.findMany({ where: { userId, projectId: { in: ids } } })
+      : Promise.resolve([]),
+    userId
+      ? prisma.bookSubscription.findMany({ where: { userId, projectId: { in: ids } }, select: { projectId: true } })
       : Promise.resolve([]),
   ]);
   const likeRows = await prisma.bookReaction.findMany({
@@ -112,6 +117,7 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
     }
   }
   const mineOf = new Map(mine.map((m) => [m.projectId, m]));
+  const subscribed = new Set(subs.map((row) => row.projectId));
   const blocked = await blockedAuthors(userId);
   return rows.filter((row) => !blocked.has(row.ownerId)).map((row) => {
     const meta = metaOf(row.settings);
@@ -143,6 +149,7 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
       favorite: own?.favorite ?? false,
       reading: Boolean(own?.lastReadAt),
       shelf: shelfOf(own?.shelf),
+      subscribed: subscribed.has(row.id),
       cover: meta.cover,
       structure: meta.structure,
     };
@@ -167,6 +174,25 @@ function shelfOf(value: string | undefined): BookCard['shelf'] {
   return '';
 }
 
+function publicAudio(metadata: unknown): { url: string; title: string } | null {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const audio = (metadata as Record<string, unknown>).audio;
+  if (!audio || typeof audio !== 'object') return null;
+  const url = (audio as Record<string, unknown>).url;
+  if (typeof url !== 'string' || url.length > 500) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  if (parsed.username || parsed.password) return null;
+  const titleRaw = (audio as Record<string, unknown>).title;
+  const title = typeof titleRaw === 'string' ? titleRaw.trim().slice(0, 80) : '';
+  return { url: parsed.toString(), title };
+}
+
 export const catalogRoutes: FastifyPluginAsync = async (app) => {
   app.get('/api/catalog/genres', async () => ({ genres: GENRES }));
 
@@ -179,6 +205,109 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
       map.set(book.authorId, row);
     }
     return { authors: [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru')) };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/catalog/authors/:id', async (req, reply) => {
+    const author = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, name: true, image: true, createdAt: true, settings: true },
+    });
+    if (!author) return reply.status(404).send({ error: 'Автор не найден' });
+    const viewerId = req.user?.id ?? null;
+    const [mine, authored] = await Promise.all([
+      loadBooks(author.id),
+      loadBooks(viewerId),
+    ]);
+    const books = authored.filter((book) => book.authorId === author.id);
+    const ids = new Set(books.map((book) => book.id));
+    const [posts, comments, followers, following] = await Promise.all([
+      prisma.blogPost.findMany({
+        where: { authorId: author.id, published: true },
+        orderBy: { createdAt: 'desc' },
+        take: 40,
+        select: {
+          id: true,
+          title: true,
+          body: true,
+          topic: true,
+          createdAt: true,
+          views: true,
+          _count: { select: { comments: true, likes: true } },
+        },
+      }),
+      ids.size === 0
+        ? Promise.resolve([])
+        : prisma.bookComment.findMany({
+          where: { projectId: { in: [...ids] } },
+          orderBy: { createdAt: 'desc' },
+          take: 40,
+        }),
+      prisma.authorFollow.count({ where: { authorId: author.id } }),
+      viewerId
+        ? prisma.authorFollow.findUnique({ where: { userId_authorId: { userId: viewerId, authorId: author.id } } })
+        : Promise.resolve(null),
+    ]);
+    const titleOf = new Map(books.map((book) => [book.id, book.title]));
+    const shelf = (value: BookCard['shelf']) => mine.filter((book) => book.shelf === value);
+    return {
+      author: {
+        id: author.id,
+        name: author.name?.trim() || 'Автор',
+        image: author.image && author.image.length <= 220_000 ? author.image : '',
+        createdAt: author.createdAt.toISOString(),
+        about: aboutOf(author.settings),
+        books: books.length,
+        words: books.reduce((sum, book) => sum + book.words, 0),
+        followers,
+        following: Boolean(following),
+      },
+      books,
+      posts: posts.map((post) => ({
+        id: post.id,
+        title: post.title,
+        topic: post.topic,
+        excerpt: plainExcerpt(post.body),
+        createdAt: post.createdAt.toISOString(),
+        views: post.views,
+        comments: post._count.comments,
+        likes: post._count.likes,
+      })),
+      library: {
+        reading: shelf('reading'),
+        later: shelf('later'),
+        done: shelf('done'),
+        skipped: shelf('skip'),
+        favorites: mine.filter((book) => book.favorite),
+      },
+      cycles: cyclesOf(books),
+      reviews: comments.map((row) => ({
+        id: row.id,
+        bookId: row.projectId,
+        bookTitle: titleOf.get(row.projectId) ?? 'Книга',
+        authorName: row.authorName || 'Читатель',
+        body: row.body,
+        createdAt: row.createdAt.toISOString(),
+      })),
+    };
+  });
+
+  app.get('/api/me/book-subscriptions', async (req) => {
+    app.requireAuth(req);
+    const [rows, books] = await Promise.all([
+      prisma.bookSubscription.findMany({
+        where: { userId: req.user!.id },
+        orderBy: { createdAt: 'desc' },
+        select: { projectId: true, createdAt: true },
+      }),
+      loadBooks(req.user!.id),
+    ]);
+    const byId = new Map(books.map((book) => [book.id, book]));
+    return {
+      books: rows.flatMap((row) => {
+        const book = byId.get(row.projectId);
+        return book ? [{ ...book, subscribedAt: row.createdAt.toISOString() }] : [];
+      }),
+    };
   });
 
   app.get('/api/me/library', async (req) => {
@@ -267,7 +396,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     const books = await loadBooks(req.user?.id ?? null);
     const book = books.find((b) => b.id === req.params.id);
     if (!book) return reply.status(404).send({ error: 'Книга не опубликована' });
-    const [chapters, comments, authorBooks] = await Promise.all([
+    const [chapters, comments, authorBooks, marks] = await Promise.all([
       prisma.chapter.findMany({
         where: { projectId: book.id },
         select: { id: true, title: true, kind: true, parentId: true, orderIndex: true, wordCount: true },
@@ -281,10 +410,14 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
       prisma.project.count({
         where: { ownerId: book.authorId, settings: { path: ['catalog', 'published'], equals: true } },
       }),
+      prisma.chapter.findMany({
+        where: { projectId: book.id },
+        select: { id: true, parentId: true, kind: true, aiCreated: true, aiReviewed: true },
+      }),
     ]);
     const genreSet = new Set(book.genres);
     const similar = books.filter((other) => other.id !== book.id && other.genres.some((id) => genreSet.has(id))).slice(0, 6);
-    return { book, chapters, comments, authorBooks, similar };
+    return { book, chapters, comments, authorBooks, similar, ai: scoreChapters(marks) };
   });
 
   app.get<{ Params: { id: string; chapterId: string } }>('/api/catalog/books/:id/chapters/:chapterId', async (req, reply) => {
@@ -292,9 +425,10 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     if (!metaPublished(project?.settings)) return reply.status(404).send({ error: 'Книга не опубликована' });
     const chapter = await prisma.chapter.findFirst({
       where: { id: req.params.chapterId, projectId: req.params.id },
-      select: { id: true, title: true, content: true, wordCount: true, kind: true },
+      select: { id: true, title: true, content: true, wordCount: true, kind: true, metadata: true },
     });
     if (!chapter) return reply.status(404).send({ error: 'Глава не найдена' });
+    const audio = publicAudio(chapter.metadata);
     if (req.user) {
       await prisma.bookReaction.upsert({
         where: { userId_projectId: { userId: req.user.id, projectId: req.params.id } },
@@ -302,7 +436,17 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
         update: { lastReadAt: new Date() },
       });
     }
-    return { chapter };
+    return {
+      chapter: {
+        id: chapter.id,
+        title: chapter.title,
+        content: chapter.content,
+        wordCount: chapter.wordCount,
+        kind: chapter.kind,
+        audioUrl: audio?.url ?? null,
+        audioTitle: audio?.title ?? '',
+      },
+    };
   });
 
   app.post<{ Params: { id: string } }>('/api/catalog/books/:id/view', async (req, reply) => {
@@ -336,16 +480,30 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     return { disliked: on };
   });
 
+  app.post<{ Params: { id: string } }>('/api/catalog/books/:id/subscribe', async (req) => {
+    app.requireAuth(req);
+    await ensurePublished(req.params.id);
+    const key = { userId: req.user!.id, projectId: req.params.id };
+    const existing = await prisma.bookSubscription.findUnique({ where: { userId_projectId: key } });
+    if (existing) {
+      await prisma.bookSubscription.delete({ where: { userId_projectId: key } });
+      return { subscribed: false };
+    }
+    await prisma.bookSubscription.create({ data: key });
+    return { subscribed: true };
+  });
+
   app.post<{ Params: { id: string } }>('/api/catalog/books/:id/shelf', async (req) => {
     app.requireAuth(req);
     const { shelf } = shelfSchema.parse(req.body ?? {});
     await ensurePublished(req.params.id);
+    const favorite = shelf === 'reading' || shelf === 'later' || shelf === 'done';
     await prisma.bookReaction.upsert({
       where: { userId_projectId: { userId: req.user!.id, projectId: req.params.id } },
-      create: { userId: req.user!.id, projectId: req.params.id, shelf },
-      update: { shelf },
+      create: { userId: req.user!.id, projectId: req.params.id, shelf, favorite },
+      update: { shelf, favorite },
     });
-    return { shelf };
+    return { shelf, favorite };
   });
 
   app.post<{ Params: { id: string } }>('/api/catalog/books/:id/favorite', async (req) => {
@@ -396,6 +554,31 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(201).send({ report });
   });
 };
+
+function aboutOf(settings: unknown): string {
+  if (!settings || typeof settings !== 'object') return '';
+  const root = settings as { about?: unknown; bio?: unknown };
+  const value = typeof root.about === 'string' ? root.about : typeof root.bio === 'string' ? root.bio : '';
+  return value.trim().slice(0, 2000);
+}
+
+function plainExcerpt(body: string): string {
+  return body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 220);
+}
+
+function cyclesOf(books: BookCard[]): Array<{ name: string; books: BookCard[] }> {
+  const groups = new Map<string, BookCard[]>();
+  for (const book of books) {
+    const name = book.cycle.trim();
+    if (!name) continue;
+    const list = groups.get(name) ?? [];
+    list.push(book);
+    groups.set(name, list);
+  }
+  return [...groups.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0], 'ru'))
+    .map(([name, list]) => ({ name, books: list }));
+}
 
 function metaPublished(settings: unknown): boolean {
   if (!settings || typeof settings !== 'object') return false;

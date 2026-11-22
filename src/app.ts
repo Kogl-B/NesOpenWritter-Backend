@@ -25,6 +25,7 @@ import { uploadRoutes } from './routes/uploads.js';
 import { searchRoutes } from './routes/search.js';
 import { logRoutes } from './routes/logs.js';
 import { adminRoutes } from './routes/admin.js';
+import { aiRoutes } from './routes/ai.js';
 import { snapshotRoutes } from './routes/snapshots.js';
 import { wikiRoutes } from './routes/wiki.js';
 import { economyRoutes } from './routes/economy.js';
@@ -34,7 +35,9 @@ import { dictionaryRoutes } from './routes/dictionaries.js';
 import { calculatorRoutes } from './routes/calculators.js';
 import { cryptoRoutes } from './routes/crypto.js';
 import { readerReportRoutes } from './routes/readerReports.js';
+import { errorReportRoutes } from './routes/errorReports.js';
 import { catalogRoutes } from './routes/catalog.js';
+import { metricsRoutes } from './routes/metrics.js';
 import { blogRoutes } from './routes/blog.js';
 import { initSentry, captureError } from './lib/sentry.js';
 import { recordRequest, getDbStats, requestContext } from './lib/metrics.js';
@@ -155,6 +158,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(searchRoutes);
   await app.register(logRoutes);
   await app.register(adminRoutes);
+  await app.register(aiRoutes);
   await app.register(snapshotRoutes);
   await app.register(wikiRoutes);
   await app.register(economyRoutes);
@@ -164,7 +168,9 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(calculatorRoutes);
   await app.register(cryptoRoutes);
   await app.register(readerReportRoutes);
+  await app.register(errorReportRoutes);
   await app.register(catalogRoutes);
+  await app.register(metricsRoutes);
   await app.register(blogRoutes);
 
   return app;

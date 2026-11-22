@@ -1,9 +1,10 @@
 import type { FastifyPluginAsync } from 'fastify';
 
 import { Prisma } from '@prisma/client';
+import { z } from 'zod';
 
 import { prisma } from '../lib/prisma.js';
-import { assertProjectOwnership, toJson } from '../lib/access.js';
+import { assertProjectOwnership, getProjectAccess, toJson } from '../lib/access.js';
 import {
   characterCreateSchema,
   characterUpdateSchema,
@@ -450,6 +451,119 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
         orderBy: { createdAt: 'asc' },
       });
       return { positions };
+    },
+  );
+
+  const bondBody = z.object({
+    characters: z.array(z.object({
+      fromId: z.string().min(1),
+      toId: z.string().min(1),
+      name: z.string().trim().min(1).max(50),
+    })).max(100),
+    items: z.array(z.object({
+      leftId: z.string().min(1),
+      rightId: z.string().min(1),
+      name: z.string().trim().min(1).max(80),
+    })).max(100),
+  });
+
+  app.put<{ Params: { projectId: string; chapterId: string } }>(
+    '/api/projects/:projectId/chapters/:chapterId/bonds',
+    async (req, reply) => {
+      const role = await getProjectAccess(req.params.projectId, req.user!.id);
+      if (!role) return reply.status(404).send({ error: 'Project not found' });
+      if (role === 'viewer') return reply.status(403).send({ error: 'Недостаточно прав' });
+      const input = bondBody.parse(req.body);
+      const chapter = await prisma.chapter.findFirst({
+        where: { id: req.params.chapterId, projectId: req.params.projectId },
+        select: { id: true },
+      });
+      if (!chapter) return reply.status(404).send({ error: 'Сцена не найдена' });
+      const marker = `openwritter:scene:${chapter.id}`;
+
+      const characters = input.characters.filter((row) => row.fromId !== row.toId);
+      const items = input.items.filter((row) => row.leftId !== row.rightId);
+      const characterIds = [...new Set(characters.flatMap((row) => [row.fromId, row.toId]))];
+      const itemIds = [...new Set(items.flatMap((row) => [row.leftId, row.rightId]))];
+      const [knownCharacters, knownItems] = await Promise.all([
+        characterIds.length
+          ? prisma.character.findMany({ where: { projectId: req.params.projectId, id: { in: characterIds } }, select: { id: true } })
+          : [],
+        itemIds.length
+          ? prisma.item.findMany({ where: { projectId: req.params.projectId, id: { in: itemIds } }, select: { id: true } })
+          : [],
+      ]);
+      const okCharacters = new Set(knownCharacters.map((row) => row.id));
+      const okItems = new Set(knownItems.map((row) => row.id));
+
+      await prisma.$transaction(async (tx) => {
+        await tx.characterRelation.deleteMany({ where: { projectId: req.params.projectId, description: marker } });
+        const seen = new Set<string>();
+        for (const row of characters) {
+          if (!okCharacters.has(row.fromId) || !okCharacters.has(row.toId)) continue;
+          const key = `${row.fromId}:${row.toId}:${row.name.toLocaleLowerCase('ru-RU')}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const manual = await tx.characterRelation.findFirst({
+            where: { fromCharacterId: row.fromId, toCharacterId: row.toId, relationType: row.name },
+            select: { id: true },
+          });
+          if (manual) continue;
+          await tx.characterRelation.create({
+            data: {
+              projectId: req.params.projectId,
+              fromCharacterId: row.fromId,
+              toCharacterId: row.toId,
+              relationType: row.name,
+              strength: 50,
+              description: marker,
+            },
+          });
+        }
+
+        const catalog = await tx.item.findMany({
+          where: { projectId: req.params.projectId },
+          select: { id: true, name: true, metadata: true },
+        });
+        const byName = new Map(catalog.map((row) => [row.name.toLocaleLowerCase('ru-RU'), row]));
+        const kept = new Set<string>();
+        for (const row of items) {
+          if (!okItems.has(row.leftId) || !okItems.has(row.rightId)) continue;
+          const current = byName.get(row.name.toLocaleLowerCase('ru-RU'));
+          const madeFrom = [row.leftId, row.rightId];
+          if (current) {
+            const meta = current.metadata && typeof current.metadata === 'object' && !Array.isArray(current.metadata)
+              ? { ...(current.metadata as Record<string, unknown>) }
+              : {};
+            await tx.item.update({
+              where: { id: current.id },
+              data: { metadata: toJson({ ...meta, madeFrom, madeInChapter: chapter.id, source: 'manuscript', bond: row.name }) },
+            });
+            kept.add(current.id);
+            continue;
+          }
+          const created = await tx.item.create({
+            data: {
+              projectId: req.params.projectId,
+              name: row.name,
+              category: 'other',
+              metadata: toJson({ madeFrom, madeInChapter: chapter.id, source: 'manuscript', bond: row.name }),
+            },
+          });
+          byName.set(row.name.toLocaleLowerCase('ru-RU'), { id: created.id, name: created.name, metadata: created.metadata });
+          kept.add(created.id);
+        }
+        for (const row of catalog) {
+          if (kept.has(row.id)) continue;
+          const meta = row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+            ? { ...(row.metadata as Record<string, unknown>) }
+            : null;
+          if (!meta || meta.source !== 'manuscript' || meta.madeInChapter !== chapter.id) continue;
+          const { madeFrom: _from, madeInChapter: _chapter, source: _source, bond: _bond, ...rest } = meta;
+          await tx.item.update({ where: { id: row.id }, data: { metadata: toJson(rest) } });
+        }
+      });
+      return { ok: true };
     },
   );
 };

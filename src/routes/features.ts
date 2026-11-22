@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
-import { assertProjectOwnership } from '../lib/access.js';
+import { assertProjectOwnership, getProjectAccess } from '../lib/access.js';
 import { generateEpub, generateDocx, generatePdf, generateFb2 } from '../lib/exporters.js';
 
 /**
@@ -231,7 +231,7 @@ export async function featureRoutes(app: FastifyInstance) {
         x: z.number(),
         y: z.number(),
         label: z.string().trim().min(1).max(200),
-        note: z.string().max(1000).optional().nullable(),
+        note: z.string().max(8000).optional().nullable(),
         color: z.string().max(20).default('#f7bd48'),
         entityType: z.string().optional().nullable(),
         entityId: z.string().optional().nullable(),
@@ -272,7 +272,7 @@ export async function featureRoutes(app: FastifyInstance) {
         x: z.number().optional(),
         y: z.number().optional(),
         label: z.string().trim().min(1).max(200).optional(),
-        note: z.string().max(2000).nullable().optional(),
+        note: z.string().max(8000).nullable().optional(),
         color: z.string().max(20).optional(),
         entityType: z.string().max(40).nullable().optional(),
         entityId: z.string().nullable().optional(),
@@ -429,17 +429,23 @@ export async function featureRoutes(app: FastifyInstance) {
     '/api/projects/:projectId/collaborators',
     async (req, reply) => {
       if (!(await checkProject(req, reply))) return;
+      const access = await getProjectAccess(req.params.projectId, req.user!.id);
+      if (access !== 'owner' && access !== 'admin') {
+        return reply.status(403).send({ error: 'Приглашать может владелец или администратор проекта' });
+      }
       const input = z.object({
-        email: z.string().email(),
+        account: z.string().trim().min(1).max(200).optional(),
+        email: z.string().email().optional(),
         role: z.enum(['viewer', 'editor', 'admin']).default('editor'),
       }).parse(req.body);
-      // better-auth хранит email в нижнем регистре — приводим к нему же,
-      // иначе вход с «QA.Example@…» работает, а приглашение его не находит
-      const targetUser = await prisma.user.findUnique({
-        where: { email: input.email.toLowerCase() },
-      });
+      const raw = (input.account ?? input.email ?? '').trim();
+      if (!raw) return reply.status(400).send({ error: 'Укажите почту или код аккаунта' });
+      // Почта в базе в нижнем регистре. Без @ значение — код аккаунта (User.id).
+      const targetUser = raw.includes('@')
+        ? await prisma.user.findUnique({ where: { email: raw.toLowerCase() } })
+        : await prisma.user.findUnique({ where: { id: raw } });
       if (!targetUser) {
-        return reply.status(404).send({ error: 'Пользователь с таким email не найден' });
+        return reply.status(404).send({ error: 'Аккаунт с такой почтой или кодом не найден' });
       }
       if (targetUser.id === req.user!.id) {
         return reply.status(400).send({ error: 'Нельзя пригласить самого себя' });
@@ -468,14 +474,15 @@ export async function featureRoutes(app: FastifyInstance) {
     '/api/projects/:projectId/collaborators/:collaboratorId',
     async (req, reply) => {
       if (!(await checkProject(req, reply))) return;
-      try {
-        await prisma.projectCollaborator.delete({
-          where: { id: req.params.collaboratorId },
-        });
-        return reply.status(204).send();
-      } catch {
-        return reply.status(404).send({ error: 'Collaborator not found' });
+      const access = await getProjectAccess(req.params.projectId, req.user!.id);
+      if (access !== 'owner' && access !== 'admin') {
+        return reply.status(403).send({ error: 'Закрыть доступ может владелец или администратор проекта' });
       }
+      const removed = await prisma.projectCollaborator.deleteMany({
+        where: { id: req.params.collaboratorId, projectId: req.params.projectId },
+      });
+      if (removed.count === 0) return reply.status(404).send({ error: 'Collaborator not found' });
+      return reply.status(204).send();
     },
   );
 

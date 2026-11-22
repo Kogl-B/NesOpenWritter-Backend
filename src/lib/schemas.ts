@@ -23,7 +23,7 @@ const characterStatusEnum = z.enum(['alive', 'dead', 'unknown', 'missing']);
 export const characterCreateSchema = z.object({
   name: z.string().trim().min(1).max(200),
   shortName: z.string().max(100).nullish(),
-  portraitPath: z.string().max(500).nullish(),
+  portraitPath: z.string().max(500_000).nullish(),
   summary: z.string().max(2000).nullish(),
   biography: z.string().nullish(),
   faction: z.string().max(200).nullish(),

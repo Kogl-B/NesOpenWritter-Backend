@@ -2,14 +2,19 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import {
-  NOWPAYMENTS_API,
+  DEPOSIT_TIERS_USD,
+  MAX_DEPOSIT_USD,
+  MIN_DEPOSIT_USD,
   buildInvoicePayload,
+  creditedCents,
   cryptoPaymentsEnabled,
+  nowpaymentsApiBase,
+  nowpaymentsSandbox,
   nowpaymentsSignatureValid,
 } from '../lib/nowpayments.js';
 
 const createSchema = z.object({
-  amountUsd: z.number().int().min(1).max(500),
+  amountUsd: z.number().int().min(MIN_DEPOSIT_USD).max(MAX_DEPOSIT_USD),
 });
 
 function publicBase(): string {
@@ -22,6 +27,13 @@ function apiBase(reqHost: string): string {
   return reqHost.replace(/\/$/, '');
 }
 
+interface IpnBody {
+  order_id?: string;
+  payment_status?: string;
+  actually_paid?: number | string;
+  pay_amount?: number | string;
+}
+
 export const cryptoRoutes: FastifyPluginAsync = async (app) => {
   app.get('/api/payments/crypto/status', async (req) => {
     app.requireAuth(req);
@@ -30,8 +42,12 @@ export const cryptoRoutes: FastifyPluginAsync = async (app) => {
       select: { aiBalanceCents: true },
     });
     return {
-      enabled: cryptoPaymentsEnabled(),
+      enabled: cryptoPaymentsEnabled() && Boolean(process.env.NOWPAYMENTS_API_KEY),
       provider: 'nowpayments',
+      sandbox: nowpaymentsSandbox(),
+      minUsd: MIN_DEPOSIT_USD,
+      maxUsd: MAX_DEPOSIT_USD,
+      tiers: DEPOSIT_TIERS_USD,
       aiBalanceCents: user?.aiBalanceCents ?? 0,
     };
   });
@@ -41,7 +57,8 @@ export const cryptoRoutes: FastifyPluginAsync = async (app) => {
     if (!cryptoPaymentsEnabled()) {
       return reply.status(503).send({ error: 'Криптооплата пока не включена' });
     }
-    if (!process.env.NOWPAYMENTS_API_KEY) {
+    const apiKey = process.env.NOWPAYMENTS_API_KEY;
+    if (!apiKey) {
       return reply.status(503).send({ error: 'Провайдер оплаты не настроен' });
     }
     const input = createSchema.parse(req.body);
@@ -56,16 +73,16 @@ export const cryptoRoutes: FastifyPluginAsync = async (app) => {
     const payload = buildInvoicePayload({
       amountUsd: input.amountUsd,
       orderId: payment.id,
-      description: `Баланс ИИ OpenWritter, ${input.amountUsd} USD`,
+      description: `Пополнение баланса OpenWritter, ${input.amountUsd} USD`,
       ipnUrl: `${apiBase(origin)}/api/payments/nowpayments/webhook`,
-      successUrl: `${publicBase()}/account?crypto=ok`,
-      cancelUrl: `${publicBase()}/account`,
+      successUrl: `${publicBase()}/account?section=wallet&crypto=ok`,
+      cancelUrl: `${publicBase()}/account?section=wallet`,
     });
-    const resp = await fetch(`${NOWPAYMENTS_API}/invoice`, {
+    const resp = await fetch(`${nowpaymentsApiBase()}/invoice`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': process.env.NOWPAYMENTS_API_KEY,
+        'x-api-key': apiKey,
       },
       body: JSON.stringify(payload),
     });
@@ -99,38 +116,64 @@ export const cryptoRoutes: FastifyPluginAsync = async (app) => {
     if (!nowpaymentsSignatureValid(req.body, sig, secret)) {
       return reply.status(403).send({ error: 'Неверная подпись' });
     }
-    const body = req.body as {
-      order_id?: string;
-      payment_status?: string;
-      actually_paid?: number | string;
-      pay_amount?: number | string;
-    };
-    if (!body.order_id) return { ok: true };
-    const payment = await prisma.cryptoPayment.findFirst({
-      where: { id: body.order_id, provider: 'nowpayments' },
-    });
-    if (!payment || payment.creditedAt) return { ok: true };
-
-    if (body.payment_status === 'finished') {
-      await prisma.$transaction([
-        prisma.user.update({
-          where: { id: payment.userId },
-          data: { aiBalanceCents: { increment: payment.amountUsdCents } },
-        }),
-        prisma.cryptoPayment.update({
-          where: { id: payment.id },
-          data: { status: 'finished', creditedAt: new Date() },
-        }),
-      ]);
-      return { ok: true };
-    }
-
-    if (body.payment_status === 'failed' || body.payment_status === 'expired') {
-      await prisma.cryptoPayment.update({
-        where: { id: payment.id },
-        data: { status: 'canceled' },
-      });
-    }
+    const body = req.body as IpnBody;
+    if (!body.order_id || !body.payment_status) return { ok: true };
+    await applyNowpaymentsNotice(body);
     return { ok: true };
   });
 };
+
+export async function applyNowpaymentsNotice(body: IpnBody): Promise<void> {
+  const status = body.payment_status;
+  if (!body.order_id || !status) return;
+  const payment = await prisma.cryptoPayment.findFirst({
+    where: { id: body.order_id, provider: 'nowpayments' },
+  });
+  if (!payment) return;
+
+  const cents = creditedCents(payment.amountUsdCents, status, body.actually_paid, body.pay_amount);
+  if (cents != null) {
+    await prisma.$transaction(async (tx) => {
+      const marked = await tx.cryptoPayment.updateMany({
+        where: { id: payment.id, creditedAt: null, reversedAt: null },
+        data: {
+          status: status === 'partially_paid' ? 'partial' : 'finished',
+          creditedAt: new Date(),
+          creditedUsdCents: cents,
+        },
+      });
+      if (marked.count !== 1 || cents <= 0) return;
+      await tx.user.update({
+        where: { id: payment.userId },
+        data: { aiBalanceCents: { increment: cents } },
+      });
+    });
+    return;
+  }
+
+  if (status === 'refunded') {
+    await prisma.$transaction(async (tx) => {
+      const row = await tx.cryptoPayment.findUnique({ where: { id: payment.id } });
+      if (!row || row.reversedAt) return;
+      const marked = await tx.cryptoPayment.updateMany({
+        where: { id: row.id, reversedAt: null },
+        data: { status: 'refunded', reversedAt: new Date() },
+      });
+      if (marked.count !== 1) return;
+      if (row.creditedAt && row.creditedUsdCents > 0) {
+        await tx.user.update({
+          where: { id: row.userId },
+          data: { aiBalanceCents: { decrement: row.creditedUsdCents } },
+        });
+      }
+    });
+    return;
+  }
+
+  if ((status === 'failed' || status === 'expired') && !payment.creditedAt && !payment.reversedAt) {
+    await prisma.cryptoPayment.updateMany({
+      where: { id: payment.id, creditedAt: null, reversedAt: null },
+      data: { status: 'canceled' },
+    });
+  }
+}
