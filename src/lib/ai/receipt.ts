@@ -46,5 +46,5 @@ export function pricesForUsage(
       outputUsdPerM: found.outputUsdPerM,
     };
   }
-  return MODEL_PRESETS[model]?.prices ?? MODEL_PRESETS['deepseek-flash'].prices;
+  return MODEL_PRESETS[model]?.prices ?? MODEL_PRESETS['deepseek-flash']?.prices ?? null;
 }

@@ -4,7 +4,8 @@ import { describe, it } from 'node:test';
 import { MODEL_PRESETS } from './deepseek.js';
 import { pricesForUsage, splitReceipt } from './receipt.js';
 
-const flash = MODEL_PRESETS['deepseek-flash'].prices;
+const flash = MODEL_PRESETS['deepseek-flash']?.prices;
+if (!flash) throw new Error('нет тарифа deepseek-flash');
 
 describe('квитанция операции', () => {
   it('делит стоимость ИИ-вставки на вход и ответ', () => {

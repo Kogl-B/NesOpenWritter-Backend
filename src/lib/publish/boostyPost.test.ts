@@ -16,9 +16,13 @@ describe('boosty post', () => {
     assert.equal(form.get('teaser_data'), '[]');
     const blocks = JSON.parse(form.get('data') ?? '[]') as Array<{ content: string; modificator: string }>;
     assert.equal(blocks.length, 4);
-    assert.equal(JSON.parse(blocks[0].content)[0], 'Первая строка');
-    assert.equal(blocks[1].modificator, 'BLOCK_END');
-    assert.equal(JSON.parse(blocks[2].content)[0], 'Вторая');
+    const first = blocks[0];
+    const end = blocks[1];
+    const third = blocks[2];
+    if (!first || !end || !third) throw new Error('нет блоков');
+    assert.equal(JSON.parse(first.content)[0], 'Первая строка');
+    assert.equal(end.modificator, 'BLOCK_END');
+    assert.equal(JSON.parse(third.content)[0], 'Вторая');
   });
 
   it('вкладывает фото и ссылку', () => {

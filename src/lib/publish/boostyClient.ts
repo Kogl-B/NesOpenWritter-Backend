@@ -211,7 +211,7 @@ function pngSize(bytes: Uint8Array): { width: number; height: number } {
 async function uploadRequest(
   session: BoostySession,
   url: string,
-  init: { method: string; body?: BodyInit; contentType?: string; blog?: string; part?: number },
+  init: { method: string; body?: string | Uint8Array; contentType?: string; blog?: string; part?: number },
 ): Promise<{ status: number; body: unknown }> {
   let response: Response;
   try {

@@ -457,7 +457,7 @@ export const publishRoutes: FastifyPluginAsync = async (app) => {
   app.post('/api/publish/boosty/image', async (req, reply) => {
     app.requireAuth(req);
     if (!Buffer.isBuffer(req.body)) return reply.status(400).send({ error: 'Пришлите файл фото' });
-    const type = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+    const type = String(req.headers['content-type'] ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
     try {
       const opened = await openBoosty(req.user!.id);
       const uploaded = await uploadBoostyImage(opened.session, { bytes: req.body, type }, opened.blog);

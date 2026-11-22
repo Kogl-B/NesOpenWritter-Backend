@@ -29,7 +29,7 @@ export function parseSponsrSess(raw: string): string {
   if (text.length > 20_000) throw new Error('Сессия слишком длинная');
   const compact = text.replace(/^\s*cookie\s*:/i, '').replace(/\s+/g, '');
   const match = compact.match(/(?:^|;)SESS=([^;]+)/i);
-  const value = match ? match[1] : compact.replace(/^SESS(?:=|:)?/i, '');
+  const value = match?.[1] ?? compact.replace(/^SESS(?:=|:)?/i, '');
   return sessValue(value);
 }
 
