@@ -1,10 +1,15 @@
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../lib/prisma.js';
 import { GENRES, expandGenre, genreName } from '../lib/genres.js';
 import { readerReportCreateSchema } from '../lib/schemas.js';
 import { scoreChapters } from '../lib/aiMarks.js';
+import { chapterIsHidden } from '../lib/publish/visibility.js';
+import { bookBlocked, chapterBlocked, postBlocked } from '../lib/geo/policy.js';
+import { countryBlocks, denyCatalogGeo, denyGeo } from '../lib/geo/request.js';
+import { commentNotices, readerReportNotice } from '../lib/notify/drafts.js';
+import { writeNotices } from '../lib/notify/deliver.js';
 
 interface RawBook {
   id: string;
@@ -86,6 +91,7 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
     FROM projects p
     JOIN users u ON u.id = p."ownerId"
     LEFT JOIN chapters c ON c."projectId" = p.id
+      AND COALESCE(c.metadata->>'public', '') <> 'false'
     WHERE COALESCE(p.settings #>> '{catalog,published}', '') = 'true'
     GROUP BY p.id, u.name
   `;
@@ -163,6 +169,7 @@ function byDate(value: string): number {
 const commentSchema = z.object({
   body: z.string().trim().min(1).max(2000),
   chapterId: z.string().max(80).optional(),
+  parentId: z.string().trim().max(64).optional(),
 });
 const flagSchema = z.object({ on: z.boolean().optional() });
 const shelfSchema = z.object({
@@ -194,10 +201,14 @@ function publicAudio(metadata: unknown): { url: string; title: string } | null {
 }
 
 export const catalogRoutes: FastifyPluginAsync = async (app) => {
+  app.addHook('preHandler', async (req, reply) => {
+    if (await denyCatalogGeo(req, reply)) return reply;
+  });
+
   app.get('/api/catalog/genres', async () => ({ genres: GENRES }));
 
-  app.get('/api/catalog/authors', async () => {
-    const books = await loadBooks(null);
+  app.get('/api/catalog/authors', async (req) => {
+    const books = await hideBooks(req, await loadBooks(null));
     const map = new Map<string, { id: string; name: string; books: number }>();
     for (const book of books) {
       const row = map.get(book.authorId) ?? { id: book.authorId, name: book.authorName, books: 0 };
@@ -214,11 +225,14 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     });
     if (!author) return reply.status(404).send({ error: 'Автор не найден' });
     const viewerId = req.user?.id ?? null;
-    const [mine, authored] = await Promise.all([
+    const geo = await countryBlocks(req);
+    const [mineRaw, authoredRaw] = await Promise.all([
       loadBooks(author.id),
       loadBooks(viewerId),
     ]);
-    const books = authored.filter((book) => book.authorId === author.id);
+    const keepBook = (book: BookCard) => !bookBlocked(geo.index, geo.country, book.id);
+    const mine = mineRaw.filter(keepBook);
+    const books = authoredRaw.filter((book) => book.authorId === author.id && keepBook(book));
     const ids = new Set(books.map((book) => book.id));
     const [posts, comments, followers, following] = await Promise.all([
       prisma.blogPost.findMany({
@@ -262,7 +276,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
         following: Boolean(following),
       },
       books,
-      posts: posts.map((post) => ({
+      posts: posts.filter((post) => !postBlocked(geo.index, geo.country, post.id)).map((post) => ({
         id: post.id,
         title: post.title,
         topic: post.topic,
@@ -293,7 +307,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
 
   app.get('/api/me/book-subscriptions', async (req) => {
     app.requireAuth(req);
-    const [rows, books] = await Promise.all([
+    const [rows, loaded] = await Promise.all([
       prisma.bookSubscription.findMany({
         where: { userId: req.user!.id },
         orderBy: { createdAt: 'desc' },
@@ -301,6 +315,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
       }),
       loadBooks(req.user!.id),
     ]);
+    const books = await hideBooks(req, loaded);
     const byId = new Map(books.map((book) => [book.id, book]));
     return {
       books: rows.flatMap((row) => {
@@ -312,7 +327,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
 
   app.get('/api/me/library', async (req) => {
     app.requireAuth(req);
-    const books = await loadBooks(req.user!.id);
+    const books = await hideBooks(req, await loadBooks(req.user!.id));
     return {
       favorites: books.filter((book) => book.favorite),
       reading: books.filter((book) => book.shelf === 'reading' || (!book.shelf && book.reading)),
@@ -324,7 +339,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get('/api/catalog/home', async (req) => {
-    const books = await loadBooks(req.user?.id ?? null);
+    const books = await hideBooks(req, await loadBooks(req.user?.id ?? null));
     const take = (list: BookCard[]) => list.slice(0, 12);
     const fresh = books.filter((b) => Date.now() - byDate(b.createdAt) < 90 * 86400000);
     const mine = books.filter((b) => b.favorite);
@@ -352,7 +367,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     const minWords = Number(req.query.minWords ?? 0) || 0;
     const maxWords = Number(req.query.maxWords ?? 0) || 0;
     const allowed = genre ? new Set(expandGenre(genre)) : null;
-    let books = await loadBooks(req.user?.id ?? null);
+    let books = await hideBooks(req, await loadBooks(req.user?.id ?? null));
     books = books.filter((book) => {
       if (allowed && !book.genres.some((id) => allowed.has(id))) return false;
       if (status && book.status !== status) return false;
@@ -375,7 +390,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get('/api/catalog/tops', async (req) => {
-    const books = await loadBooks(req.user?.id ?? null);
+    const books = await hideBooks(req, await loadBooks(req.user?.id ?? null));
     const authors = new Map<string, { id: string; name: string; books: number; words: number; likes: number; views: number }>();
     for (const book of books) {
       const row = authors.get(book.authorId) ?? { id: book.authorId, name: book.authorName, books: 0, words: 0, likes: 0, views: 0 };
@@ -393,13 +408,16 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get<{ Params: { id: string } }>('/api/catalog/books/:id', async (req, reply) => {
+    const geo = await countryBlocks(req);
     const books = await loadBooks(req.user?.id ?? null);
     const book = books.find((b) => b.id === req.params.id);
     if (!book) return reply.status(404).send({ error: 'Книга не опубликована' });
-    const [chapters, comments, authorBooks, marks] = await Promise.all([
+    if (bookBlocked(geo.index, geo.country, book.id)) return denyGeo(reply);
+    const shelf = books.filter((item) => !bookBlocked(geo.index, geo.country, item.id));
+    const [chapters, comments, marks] = await Promise.all([
       prisma.chapter.findMany({
         where: { projectId: book.id },
-        select: { id: true, title: true, kind: true, parentId: true, orderIndex: true, wordCount: true },
+        select: { id: true, title: true, kind: true, parentId: true, orderIndex: true, wordCount: true, metadata: true },
         orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],
       }),
       prisma.bookComment.findMany({
@@ -407,17 +425,34 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
         orderBy: { createdAt: 'desc' },
         take: 40,
       }),
-      prisma.project.count({
-        where: { ownerId: book.authorId, settings: { path: ['catalog', 'published'], equals: true } },
-      }),
       prisma.chapter.findMany({
         where: { projectId: book.id },
-        select: { id: true, parentId: true, kind: true, aiCreated: true, aiReviewed: true },
+        select: { id: true, parentId: true, kind: true, aiCreated: true, aiReviewed: true, metadata: true },
       }),
     ]);
+    const openChapter = (row: { id: string; metadata: unknown }) => (
+      !chapterIsHidden(row.metadata) && !chapterBlocked(geo.index, geo.country, book.id, row.id)
+    );
+    const closed = chapters.filter((row) => !chapterIsHidden(row.metadata) && !openChapter(row));
+    const visibleChapters = chapters
+      .filter(openChapter)
+      .map(({ metadata: _metadata, ...row }) => row);
+    const visibleComments = comments.filter((row) => !row.chapterId || !chapterBlocked(geo.index, geo.country, book.id, row.chapterId));
+    const parentNames = await commentParentNames(visibleComments.map((row) => row.parentId));
     const genreSet = new Set(book.genres);
-    const similar = books.filter((other) => other.id !== book.id && other.genres.some((id) => genreSet.has(id))).slice(0, 6);
-    return { book, chapters, comments, authorBooks, similar, ai: scoreChapters(marks) };
+    const publicBook = {
+      ...book,
+      words: Math.max(0, book.words - closed.reduce((sum, row) => sum + row.wordCount, 0)),
+      chapters: Math.max(0, book.chapters - closed.length),
+    };
+    return {
+      book: publicBook,
+      chapters: visibleChapters,
+      comments: visibleComments.map((row) => publicBookComment(row, row.parentId ? parentNames.get(row.parentId) ?? '' : '')),
+      authorBooks: shelf.filter((item) => item.authorId === book.authorId).length,
+      similar: shelf.filter((other) => other.id !== book.id && other.genres.some((id) => genreSet.has(id))).slice(0, 6),
+      ai: scoreChapters(marks.filter(openChapter)),
+    };
   });
 
   app.get<{ Params: { id: string; chapterId: string } }>('/api/catalog/books/:id/chapters/:chapterId', async (req, reply) => {
@@ -427,7 +462,9 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
       where: { id: req.params.chapterId, projectId: req.params.id },
       select: { id: true, title: true, content: true, wordCount: true, kind: true, metadata: true },
     });
-    if (!chapter) return reply.status(404).send({ error: 'Глава не найдена' });
+    if (!chapter || chapterIsHidden(chapter.metadata)) return reply.status(404).send({ error: 'Глава не найдена' });
+    const geo = await countryBlocks(req);
+    if (chapterBlocked(geo.index, geo.country, req.params.id, req.params.chapterId)) return denyGeo(reply);
     const audio = publicAudio(chapter.metadata);
     if (req.user) {
       await prisma.bookReaction.upsert({
@@ -514,9 +551,22 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
 
   app.post<{ Params: { id: string } }>('/api/catalog/books/:id/comments', async (req, reply) => {
     app.requireAuth(req);
-    const project = await prisma.project.findUnique({ where: { id: req.params.id }, select: { settings: true } });
-    if (!metaPublished(project?.settings)) return reply.status(404).send({ error: 'Книга не опубликована' });
+    const project = await prisma.project.findUnique({
+      where: { id: req.params.id },
+      select: { settings: true, ownerId: true, name: true },
+    });
+    if (!metaPublished(project?.settings) || !project) return reply.status(404).send({ error: 'Книга не опубликована' });
     const input = commentSchema.parse(req.body);
+    const geo = await countryBlocks(req);
+    if (input.chapterId && chapterBlocked(geo.index, geo.country, req.params.id, input.chapterId)) return denyGeo(reply);
+    const parentId = input.parentId ?? '';
+    const parent = parentId
+      ? await prisma.bookComment.findFirst({
+        where: { id: parentId, projectId: req.params.id },
+        select: { userId: true, authorName: true },
+      })
+      : null;
+    if (parentId && !parent) return reply.status(400).send({ error: 'Комментарий для ответа не найден' });
     const comment = await prisma.bookComment.create({
       data: {
         projectId: req.params.id,
@@ -524,24 +574,40 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
         authorName: req.user!.name?.trim() || 'Читатель',
         body: input.body,
         chapterId: input.chapterId ?? '',
+        parentId,
       },
     });
-    return reply.status(201).send({ comment });
+    await writeNotices(commentNotices({
+      target: 'book',
+      actorId: req.user!.id,
+      actorName: comment.authorName,
+      ownerId: project.ownerId,
+      parentUserId: parent?.userId ?? '',
+      commentId: comment.id,
+      subjectId: req.params.id,
+      subjectTitle: project.name,
+      body: comment.body,
+    }));
+    return reply.status(201).send({
+      comment: publicBookComment(comment, parent?.authorName || ''),
+    });
   });
 
   app.post<{ Params: { id: string } }>('/api/catalog/books/:id/reports', async (req, reply) => {
     app.requireAuth(req);
     const project = await prisma.project.findUnique({
       where: { id: req.params.id },
-      select: { settings: true, ownerId: true },
+      select: { settings: true, ownerId: true, name: true },
     });
     if (!metaPublished(project?.settings) || !project) return reply.status(404).send({ error: 'Книга не опубликована' });
     const input = readerReportCreateSchema.parse(req.body);
     const chapter = await prisma.chapter.findFirst({
       where: { id: input.chapterId, projectId: req.params.id },
-      select: { id: true },
+      select: { id: true, metadata: true },
     });
-    if (!chapter) return reply.status(404).send({ error: 'Глава не найдена' });
+    if (!chapter || chapterIsHidden(chapter.metadata)) return reply.status(404).send({ error: 'Глава не найдена' });
+    const geo = await countryBlocks(req);
+    if (chapterBlocked(geo.index, geo.country, req.params.id, chapter.id)) return denyGeo(reply);
     const report = await prisma.readerReport.create({
       data: {
         projectId: req.params.id,
@@ -551,9 +617,40 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
         note: input.note ?? '',
       },
     });
+    await writeNotices(readerReportNotice({
+      authorId: project.ownerId,
+      reportId: report.id,
+      bookTitle: project.name,
+      quote: report.quote,
+    }));
     return reply.status(201).send({ report });
   });
 };
+
+function publicBookComment(
+  row: { id: string; authorName: string; body: string; chapterId: string; parentId: string; createdAt: Date },
+  parentAuthorName: string,
+) {
+  return {
+    id: row.id,
+    authorName: row.authorName || 'Читатель',
+    body: row.body,
+    chapterId: row.chapterId,
+    parentId: row.parentId,
+    parentAuthorName: row.parentId ? parentAuthorName : '',
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+async function commentParentNames(ids: string[]): Promise<Map<string, string>> {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (unique.length === 0) return new Map();
+  const rows = await prisma.bookComment.findMany({
+    where: { id: { in: unique } },
+    select: { id: true, authorName: true },
+  });
+  return new Map(rows.map((row) => [row.id, row.authorName || 'Читатель']));
+}
 
 function aboutOf(settings: unknown): string {
   if (!settings || typeof settings !== 'object') return '';
@@ -578,6 +675,12 @@ function cyclesOf(books: BookCard[]): Array<{ name: string; books: BookCard[] }>
   return [...groups.entries()]
     .sort((a, b) => a[0].localeCompare(b[0], 'ru'))
     .map(([name, list]) => ({ name, books: list }));
+}
+
+async function hideBooks(req: FastifyRequest, books: BookCard[]): Promise<BookCard[]> {
+  const geo = await countryBlocks(req);
+  if (!geo.country) return books;
+  return books.filter((book) => !bookBlocked(geo.index, geo.country, book.id));
 }
 
 function metaPublished(settings: unknown): boolean {

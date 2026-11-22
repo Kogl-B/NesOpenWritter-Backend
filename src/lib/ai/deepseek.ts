@@ -55,6 +55,13 @@ export function isPeakHour(now = new Date()): boolean {
   return (hour >= 1 && hour < 4) || (hour >= 6 && hour < 10);
 }
 
+/** Цена для пользователя: себестоимость токенов, умноженная на наценку. По умолчанию ×3. */
+export function withMarkup(realMicros: number, multiplier: number): number {
+  const factor = Number.isInteger(multiplier) && multiplier >= 1 && multiplier <= 20 ? multiplier : 3;
+  if (!Number.isFinite(realMicros) || realMicros <= 0) return 0;
+  return Math.round(realMicros * factor);
+}
+
 export function costUsdMicros(usage: TokenUsage, prices: ModelPrices, peak: boolean, multiplier: number): number {
   const factor = peak ? Math.max(1, multiplier) : 1;
   const raw = usage.cacheMissTokens * prices.inputMissUsdPerM
@@ -82,6 +89,7 @@ export async function completeDeepSeek(input: {
   messages: ChatMessage[];
   maxTokens: number;
   temperature: number;
+  timeoutMs?: number;
 }): Promise<{ text: string; usage: TokenUsage }> {
   const origin = new URL(input.baseUrl);
   if (origin.protocol !== 'https:') throw new Error('Адрес API должен начинаться с https://');
@@ -93,12 +101,12 @@ export async function completeDeepSeek(input: {
     temperature: input.temperature,
     stream: false,
   };
-  const signal = AbortSignal.timeout(45_000);
+  const signal = AbortSignal.timeout(input.timeoutMs ?? 45_000);
   let response = await postChat(url, input.apiKey, { ...base, thinking: { type: 'disabled' } }, signal);
   if (response.status === 400) {
     const probe = await response.text();
     if (/thinking/i.test(probe)) {
-      response = await postChat(url, input.apiKey, base, AbortSignal.timeout(45_000));
+      response = await postChat(url, input.apiKey, base, AbortSignal.timeout(input.timeoutMs ?? 45_000));
     } else {
       throw new Error(deepSeekError(response.status, probe));
     }

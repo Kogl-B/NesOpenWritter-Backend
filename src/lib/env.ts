@@ -52,6 +52,11 @@ const envSchema = z.object({
     .or(z.literal(''))
     .optional()
     .transform((v) => (v === '' ? undefined : v)),
+
+  // Общий секрет Vercel-прокси и API. Пусто — страну берём только по IP.
+  GEO_EDGE_TOKEN: z.string().optional().default(''),
+  // Только не production: подменить страну посетителя, чтобы проверить ограничение локально.
+  GEO_DEV_COUNTRY: z.string().optional().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);

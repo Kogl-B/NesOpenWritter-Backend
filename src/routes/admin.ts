@@ -10,8 +10,22 @@ import {
   requireAdmin,
   STATUS_CATALOG,
 } from '../lib/accountStatus.js';
-import { MODEL_PRESETS, completeDeepSeek } from '../lib/ai/deepseek.js';
-import { ensureProvider, periodStart, recordUsage } from '../lib/ai/meter.js';
+import { MODEL_PRESETS, completeDeepSeek, costUsdMicros, isPeakHour, withMarkup } from '../lib/ai/deepseek.js';
+import { ensureImageProvider, ensureProvider, periodStart, recordUsage } from '../lib/ai/meter.js';
+import {
+  DEFAULT_OPENAI_IMAGE_MODEL,
+  IMAGE_QUALITIES,
+  IMAGE_SIZE_CHOICES,
+  OPENAI_IMAGE_MODEL_TITLES,
+  OPENAI_IMAGE_MODELS,
+  isOpenAIImageModel,
+  normalizeImageModel,
+  normalizeImageOptions,
+  probeOpenAIImageKey,
+  publicGeneration,
+  readGeneration,
+  splitOpenAIKeys,
+} from '../lib/ai/openaiImage.js';
 import { openSecret, sealSecret, secretHint } from '../lib/ai/secret.js';
 import { loadBookReading, loadReaderStats, loadSiteStats } from '../lib/siteStats.js';
 import { safeAdHref } from '../lib/traffic.js';
@@ -25,7 +39,7 @@ const userPatchSchema = z.object({
 });
 
 const aiPutSchema = z.object({
-  apiKey: z.string().trim().max(400).optional(),
+  apiKey: z.string().trim().max(4000).optional(),
   clearKey: z.boolean().optional(),
   baseUrl: z.string().trim().url().max(200),
   model: z.string().trim().min(1).max(64),
@@ -34,10 +48,51 @@ const aiPutSchema = z.object({
   inputHitUsdPerM: z.number().int().min(0).max(100_000_000),
   outputUsdPerM: z.number().int().min(0).max(100_000_000),
   peakMultiplier: z.number().int().min(1).max(4),
+  chargeMultiplier: z.number().int().min(1).max(20).default(3),
   testQuota: z.number().int().min(0).max(100_000_000),
   regularQuota: z.number().int().min(0).max(100_000_000),
   adminQuota: z.number().int().min(0).max(100_000_000),
 });
+
+const imagePutSchema = z.object({
+  apiKey: z.string().trim().max(4000).optional(),
+  clearKey: z.boolean().optional(),
+  baseUrl: z.string().trim().url().max(200),
+  model: z.enum(OPENAI_IMAGE_MODELS),
+  enabled: z.boolean(),
+  inputMissUsdPerM: z.number().int().min(0).max(100_000_000).default(5_000_000),
+  inputHitUsdPerM: z.number().int().min(0).max(100_000_000).default(8_000_000),
+  outputUsdPerM: z.number().int().min(0).max(100_000_000).default(30_000_000),
+  chargeMultiplier: z.number().int().min(1).max(20).default(3),
+  size: z.string().trim().max(20).default('1024x1024'),
+  quality: z.string().trim().max(20).default('low'),
+  outputFormat: z.enum(['png', 'jpeg', 'webp']).default('png'),
+  outputCompression: z.number().int().min(0).max(100).default(100),
+  background: z.enum(['auto', 'opaque', 'transparent']).default('auto'),
+  moderation: z.enum(['auto', 'low']).default('auto'),
+});
+
+function publicImageProvider(row: Awaited<ReturnType<typeof ensureImageProvider>>) {
+  const model = isOpenAIImageModel(row.model) ? row.model : DEFAULT_OPENAI_IMAGE_MODEL;
+  const generation = publicGeneration(readGeneration(row.generation, model));
+  return {
+    provider: row.provider,
+    label: row.label,
+    baseUrl: row.baseUrl,
+    model,
+    enabled: row.enabled,
+    hasKey: row.keyCipher.length > 0,
+    keyHint: row.keyHint,
+    inputMissUsdPerM: row.inputMissUsdPerM,
+    inputHitUsdPerM: row.inputHitUsdPerM,
+    outputUsdPerM: row.outputUsdPerM,
+    chargeMultiplier: row.chargeMultiplier,
+    generation,
+    modes: OPENAI_IMAGE_MODELS.map((id) => ({ id, title: OPENAI_IMAGE_MODEL_TITLES[id] })),
+    sizes: IMAGE_SIZE_CHOICES,
+    qualities: IMAGE_QUALITIES,
+  };
+}
 
 function publicProvider(row: Awaited<ReturnType<typeof ensureProvider>>) {
   return {
@@ -52,6 +107,7 @@ function publicProvider(row: Awaited<ReturnType<typeof ensureProvider>>) {
     inputHitUsdPerM: row.inputHitUsdPerM,
     outputUsdPerM: row.outputUsdPerM,
     peakMultiplier: row.peakMultiplier,
+    chargeMultiplier: row.chargeMultiplier,
     testQuota: row.testQuota,
     regularQuota: row.regularQuota,
     adminQuota: row.adminQuota,
@@ -380,6 +436,7 @@ export async function adminRoutes(app: FastifyInstance) {
         inputHitUsdPerM: input.inputHitUsdPerM,
         outputUsdPerM: input.outputUsdPerM,
         peakMultiplier: input.peakMultiplier,
+        chargeMultiplier: input.chargeMultiplier,
         testQuota: input.testQuota,
         regularQuota: input.regularQuota,
         adminQuota: input.adminQuota,
@@ -412,6 +469,7 @@ export async function adminRoutes(app: FastifyInstance) {
         maxTokens: 32,
         temperature: 0,
       });
+      const real = costUsdMicros(result.usage, provider, isPeakHour(), provider.peakMultiplier);
       const row = await recordUsage({
         userId: req.user!.id,
         projectId: null,
@@ -420,6 +478,7 @@ export async function adminRoutes(app: FastifyInstance) {
         usage: result.usage,
         prices: provider,
         peakMultiplier: provider.peakMultiplier,
+        costUsdMicros: withMarkup(real, provider.chargeMultiplier),
       });
       return {
         text: result.text,
@@ -429,6 +488,96 @@ export async function adminRoutes(app: FastifyInstance) {
       const message = err instanceof Error ? err.message : 'DeepSeek не ответил';
       return reply.status(502).send({ error: message });
     }
+  });
+
+  app.get('/api/admin/ai/image', async (req, reply) => {
+    if (!(await requireAdmin(app, req, reply))) return;
+    return publicImageProvider(await ensureImageProvider());
+  });
+
+  app.put('/api/admin/ai/image', async (req, reply) => {
+    if (!(await requireAdmin(app, req, reply))) return;
+    const input = imagePutSchema.parse(req.body);
+    let parsed: URL;
+    try {
+      parsed = new URL(input.baseUrl);
+    } catch {
+      return reply.status(400).send({ error: 'Некорректный адрес API' });
+    }
+    if (parsed.protocol !== 'https:') {
+      return reply.status(400).send({ error: 'Адрес API должен начинаться с https://' });
+    }
+    const current = await ensureImageProvider();
+    let keyCipher = current.keyCipher;
+    let keyHint = current.keyHint;
+    if (input.clearKey) {
+      keyCipher = '';
+      keyHint = '';
+    } else if (input.apiKey) {
+      const keys = splitOpenAIKeys(input.apiKey);
+      if (keys.length === 0) return reply.status(400).send({ error: 'Ключ пустой' });
+      keyCipher = sealSecret(keys.join('\n'));
+      keyHint = secretHint(keys[keys.length - 1] ?? '');
+    }
+    if (input.enabled && !keyCipher) {
+      return reply.status(400).send({ error: 'Сначала сохраните ключ, потом включайте генерацию' });
+    }
+    let generation: ReturnType<typeof normalizeImageOptions>;
+    try {
+      generation = normalizeImageOptions({
+        model: input.model,
+        size: input.size,
+        quality: input.quality,
+        output_format: input.outputFormat,
+        output_compression: input.outputCompression,
+        background: input.background,
+        moderation: input.moderation,
+      });
+    } catch (err) {
+      return reply.status(400).send({ error: err instanceof Error ? err.message : 'Настройки генерации не подходят' });
+    }
+    const saved = await prisma.aiProvider.update({
+      where: { provider: 'openai-image' },
+      data: {
+        baseUrl: parsed.origin,
+        model: input.model,
+        enabled: input.enabled,
+        inputMissUsdPerM: input.inputMissUsdPerM,
+        inputHitUsdPerM: input.inputHitUsdPerM,
+        outputUsdPerM: input.outputUsdPerM,
+        chargeMultiplier: input.chargeMultiplier,
+        generation,
+        keyCipher,
+        keyHint,
+      },
+    });
+    return publicImageProvider(saved);
+  });
+
+  app.post('/api/admin/ai/image/test', async (req, reply) => {
+    if (!(await requireAdmin(app, req, reply))) return;
+    const provider = await ensureImageProvider();
+    if (!provider.keyCipher) return reply.status(400).send({ error: 'Ключ ещё не сохранён' });
+    let keys: string[];
+    try {
+      keys = splitOpenAIKeys(openSecret(provider.keyCipher));
+    } catch {
+      return reply.status(500).send({ error: 'Ключ OpenAI не читается. Сохраните его заново.' });
+    }
+    if (keys.length === 0) return reply.status(400).send({ error: 'Ключ ещё не сохранён' });
+    const model = normalizeImageModel(provider.model);
+    const checks = [];
+    for (const key of keys) {
+      checks.push(await probeOpenAIImageKey({ apiKey: key, model, baseUrl: provider.baseUrl }));
+    }
+    const valid = checks.filter((row) => row.ok).length;
+    return {
+      ok: valid > 0,
+      model,
+      validKeys: valid,
+      totalKeys: checks.length,
+      error: valid > 0 ? undefined : checks[0] && !checks[0].ok ? checks[0].error : 'Ключ не открыл модель',
+    };
   });
 
   app.get('/api/admin/metrics', async (req, reply) => {

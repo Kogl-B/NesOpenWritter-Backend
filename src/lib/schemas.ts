@@ -193,6 +193,7 @@ export const characterPositionUpdateSchema = z.object({
 // ----- Chapter --------------------------------------------------------------
 
 const chapterKindEnum = z.enum(['chapter', 'scene']);
+export const chapterStageEnum = z.enum(['new', 'writing', 'done', 'checked', 'published', 'scheduled']);
 
 export const chapterCreateSchema = z.object({
   parentId: nullableId,
@@ -205,6 +206,9 @@ export const chapterCreateSchema = z.object({
   eventId: nullableId,
   locationId: nullableId,
   metadata: jsonObject.optional(),
+  stage: chapterStageEnum.optional(),
+  publishAt: z.string().max(40).nullable().optional(),
+  tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
 });
 
 export const chapterUpdateSchema = chapterCreateSchema.partial();

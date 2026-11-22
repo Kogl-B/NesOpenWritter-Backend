@@ -3,6 +3,8 @@ import type { FastifyPluginAsync } from 'fastify';
 import { prisma } from '../lib/prisma.js';
 import { getProjectAccess } from '../lib/access.js';
 import { readerReportCreateSchema } from '../lib/schemas.js';
+import { readerReportNotice } from '../lib/notify/drafts.js';
+import { writeNotices } from '../lib/notify/deliver.js';
 
 function reportsEnabled(settings: unknown): boolean {
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return true;
@@ -20,7 +22,7 @@ export const readerReportRoutes: FastifyPluginAsync = async (app) => {
     const input = readerReportCreateSchema.parse(req.body);
     const project = await prisma.project.findUnique({
       where: { id: req.params.projectId },
-      select: { ownerId: true },
+      select: { ownerId: true, name: true },
     });
     if (!project) return reply.status(404).send({ error: 'Проект не найден' });
     const chapter = await prisma.chapter.findFirst({
@@ -37,6 +39,12 @@ export const readerReportRoutes: FastifyPluginAsync = async (app) => {
         note: input.note ?? '',
       },
     });
+    await writeNotices(readerReportNotice({
+      authorId: project.ownerId,
+      reportId: report.id,
+      bookTitle: project.name,
+      quote: report.quote,
+    }));
     return reply.status(201).send({ report });
   });
 

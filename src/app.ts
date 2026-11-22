@@ -39,6 +39,9 @@ import { errorReportRoutes } from './routes/errorReports.js';
 import { catalogRoutes } from './routes/catalog.js';
 import { metricsRoutes } from './routes/metrics.js';
 import { blogRoutes } from './routes/blog.js';
+import { publishRoutes } from './routes/publish.js';
+import { notificationRoutes } from './routes/notifications.js';
+import { geoAdminRoutes } from './routes/geo.js';
 import { initSentry, captureError } from './lib/sentry.js';
 import { recordRequest, getDbStats, requestContext } from './lib/metrics.js';
 import { getProjectAccess } from './lib/access.js';
@@ -158,6 +161,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(searchRoutes);
   await app.register(logRoutes);
   await app.register(adminRoutes);
+  await app.register(geoAdminRoutes);
   await app.register(aiRoutes);
   await app.register(snapshotRoutes);
   await app.register(wikiRoutes);
@@ -172,6 +176,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(catalogRoutes);
   await app.register(metricsRoutes);
   await app.register(blogRoutes);
+  await app.register(publishRoutes);
+  await app.register(notificationRoutes);
 
   return app;
 }

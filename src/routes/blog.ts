@@ -2,6 +2,10 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../lib/prisma.js';
+import { postBlocked } from '../lib/geo/policy.js';
+import { countryBlocks, denyBlogGeo, denyGeo } from '../lib/geo/request.js';
+import { blogPostNotices, commentNotices } from '../lib/notify/drafts.js';
+import { writeNotices } from '../lib/notify/deliver.js';
 
 const tagsSchema = z.array(z.string().trim().min(1).max(24)).max(8);
 const writeSchema = z.object({
@@ -116,7 +120,12 @@ async function accessPrice(userId: string | undefined, authorId: string): Promis
 }
 
 export const blogRoutes: FastifyPluginAsync = async (app) => {
+  app.addHook('preHandler', async (req, reply) => {
+    if (await denyBlogGeo(req, reply)) return reply;
+  });
+
   app.get('/api/blog', async (req) => {
+    const geo = await countryBlocks(req);
     const posts = await prisma.blogPost.findMany({
       where: { published: true },
       include: postInclude,
@@ -131,7 +140,8 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
       });
       for (const row of rows) liked.add(row.postId);
     }
-    return { posts: posts.map((post) => card(post, { liked: liked.has(post.id), locked: false })) };
+    const visible = posts.filter((post) => !postBlocked(geo.index, geo.country, post.id));
+    return { posts: visible.map((post) => card(post, { liked: liked.has(post.id), locked: false })) };
   });
 
   app.get<{ Params: { authorId: string } }>('/api/blog/authors/:authorId', async (req) => {
@@ -201,17 +211,22 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
       },
     });
     if (!post) return reply.status(404).send({ error: 'Запись не найдена' });
+    const geo = await countryBlocks(req);
+    if (postBlocked(geo.index, geo.country, post.id)) return denyGeo(reply);
     const price = await accessPrice(req.user?.id, post.authorId);
     const locked = Boolean(post.level && req.user?.id !== post.authorId && price < post.level.priceRub);
     const liked = req.user
       ? Boolean(await prisma.blogLike.findUnique({ where: { userId_postId: { userId: req.user.id, postId: post.id } } }))
       : false;
+    const names = new Map(post.comments.map((comment) => [comment.id, comment.authorName || 'Читатель']));
     return {
       post: card(post, { liked, locked }),
       comments: locked ? [] : post.comments.map((comment) => ({
         id: comment.id,
         authorName: comment.authorName || 'Читатель',
         body: comment.body,
+        parentId: comment.parentId,
+        parentAuthorName: comment.parentId ? names.get(comment.parentId) ?? '' : '',
         createdAt: comment.createdAt.toISOString(),
         mine: comment.userId === req.user?.id,
       })),
@@ -241,15 +256,54 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
 
   app.post<{ Params: { id: string } }>('/api/blog/:id/comments', async (req, reply) => {
     app.requireAuth(req);
-    const input = z.object({ body: z.string().trim().min(1).max(2000) }).parse(req.body);
-    const post = await prisma.blogPost.findFirst({ where: { id: req.params.id, published: true }, select: { id: true } });
+    const input = z.object({
+      body: z.string().trim().min(1).max(2000),
+      parentId: z.string().trim().max(64).optional(),
+    }).parse(req.body);
+    const post = await prisma.blogPost.findFirst({
+      where: { id: req.params.id, published: true },
+      select: { id: true, authorId: true, title: true },
+    });
     if (!post) return reply.status(404).send({ error: 'Запись не найдена' });
+    const parentId = input.parentId ?? '';
+    const parent = parentId
+      ? await prisma.blogComment.findFirst({
+        where: { id: parentId, postId: post.id },
+        select: { userId: true, authorName: true },
+      })
+      : null;
+    if (parentId && !parent) return reply.status(400).send({ error: 'Комментарий для ответа не найден' });
     const me = await prisma.user.findUnique({ where: { id: req.user!.id }, select: { name: true } });
     const comment = await prisma.blogComment.create({
-      data: { postId: post.id, userId: req.user!.id, authorName: me?.name?.trim() || 'Читатель', body: input.body },
+      data: {
+        postId: post.id,
+        userId: req.user!.id,
+        authorName: me?.name?.trim() || 'Читатель',
+        body: input.body,
+        parentId,
+      },
     });
+    await writeNotices(commentNotices({
+      target: 'blog',
+      actorId: req.user!.id,
+      actorName: comment.authorName,
+      ownerId: post.authorId,
+      parentUserId: parent?.userId ?? '',
+      commentId: comment.id,
+      subjectId: post.id,
+      subjectTitle: post.title,
+      body: comment.body,
+    }));
     return reply.status(201).send({
-      comment: { id: comment.id, authorName: comment.authorName, body: comment.body, createdAt: comment.createdAt.toISOString(), mine: true },
+      comment: {
+        id: comment.id,
+        authorName: comment.authorName,
+        body: comment.body,
+        parentId: comment.parentId,
+        parentAuthorName: parent?.authorName || '',
+        createdAt: comment.createdAt.toISOString(),
+        mine: true,
+      },
     });
   });
 
@@ -320,13 +374,17 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
       },
       include: postInclude,
     });
+    if (post.published) await notifyBlogReaders(req.user!.id, req.user!.name?.trim() || 'Автор', post);
     return reply.status(201).send({ post: card(post) });
   });
 
   app.patch<{ Params: { id: string } }>('/api/me/blog/:id', async (req, reply) => {
     app.requireAuth(req);
     const input = writeSchema.partial().refine((row) => Object.keys(row).length > 0, 'Нечего сохранять').parse(req.body);
-    const existing = await prisma.blogPost.findFirst({ where: { id: req.params.id, authorId: req.user!.id }, select: { id: true } });
+    const existing = await prisma.blogPost.findFirst({
+      where: { id: req.params.id, authorId: req.user!.id },
+      select: { id: true, published: true },
+    });
     if (!existing) return reply.status(404).send({ error: 'Запись не найдена' });
     if (input.levelId) {
       const level = await prisma.authorLevel.findFirst({ where: { id: input.levelId, authorId: req.user!.id }, select: { id: true } });
@@ -344,6 +402,9 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
       },
       include: postInclude,
     });
+    if (post.published && !existing.published) {
+      await notifyBlogReaders(req.user!.id, req.user!.name?.trim() || 'Автор', post);
+    }
     return { post: card(post) };
   });
 
@@ -387,3 +448,17 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(204).send();
   });
 };
+
+async function notifyBlogReaders(authorId: string, authorName: string, post: { id: string; title: string }) {
+  const [follows, subs] = await Promise.all([
+    prisma.authorFollow.findMany({ where: { authorId }, select: { userId: true } }),
+    prisma.authorSubscription.findMany({ where: { authorId }, select: { userId: true } }),
+  ]);
+  await writeNotices(blogPostNotices({
+    authorId,
+    authorName,
+    postId: post.id,
+    title: post.title,
+    audienceIds: [...follows.map((row) => row.userId), ...subs.map((row) => row.userId)],
+  }));
+}

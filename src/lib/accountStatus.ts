@@ -40,7 +40,7 @@ export const STATUS_CATALOG: Record<AccountStatus, { title: string; rights: stri
     rights: [
       'Всё, что может обычный аккаунт',
       'Статистика, аккаунты и смена их статуса',
-      'Ключ DeepSeek, цены учёта и квоты',
+      'Ключи DeepSeek и OpenAI Image 2.5, цены учёта и квоты',
       'Сообщения об ошибках от пользователей',
       'ИИ без потолка, пока квота админа равна нулю',
     ],

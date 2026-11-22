@@ -6,6 +6,7 @@ import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership, toJson } from '../lib/access.js';
 import { tierIncludesRevisionHistory } from '../lib/tiers.js';
 import { countPlainText } from '../lib/plainText.js';
+import { assertScheduledDate, chapterPublishAt, chapterTags } from '../lib/chapterStage.js';
 import {
   chapterCreateSchema,
   chapterUpdateSchema,
@@ -44,6 +45,20 @@ function hashBody(s: string): string {
   }
   return (h >>> 0).toString(36);
 }
+function stageFieldsOf(
+  input: { stage?: string; publishAt?: string | null; tags?: string[] },
+  currentPublishAt: Date | null,
+) {
+  const publishAt = chapterPublishAt(input.publishAt);
+  const resolved = publishAt === undefined ? currentPublishAt : publishAt;
+  if (input.stage) assertScheduledDate(input.stage, resolved);
+  return {
+    ...(input.stage !== undefined && { stage: input.stage }),
+    ...(publishAt !== undefined && { publishAt }),
+    ...(input.tags !== undefined && { tags: chapterTags(input.tags) ?? [] }),
+  };
+}
+
 type ChapterParam = { projectId: string; chapterId: string };
 type RevisionParam = { projectId: string; chapterId: string; revisionId: string };
 
@@ -74,11 +89,11 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         Array<{
           id: string; title: string; kind: string;
           parentId: string | null; orderIndex: number; wordCount: number;
-          updatedAt: Date;
+          stage: string; publishAt: Date | null; tags: string[]; updatedAt: Date;
         }>
       >(Prisma.sql`
         SELECT id, title, kind, "parentId", "orderIndex",
-               "wordCount", "updatedAt"
+               "wordCount", stage, "publishAt", tags, "updatedAt"
         FROM chapters
         WHERE "projectId" = ${req.params.projectId}
         ORDER BY "orderIndex" ASC, "createdAt" ASC
@@ -87,8 +102,8 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       // оно не менялось. Weak-etag от тела ответа; If-None-Match → 304.
       const body = asRows
         ? {
-            cols: ['id', 'title', 'kind', 'parentId', 'orderIndex', 'wordCount', 'updatedAt'],
-            rows: chapters.map((c) => [c.id, c.title, c.kind, c.parentId, c.orderIndex, c.wordCount, c.updatedAt]),
+            cols: ['id', 'title', 'kind', 'parentId', 'orderIndex', 'wordCount', 'stage', 'publishAt', 'tags', 'updatedAt'],
+            rows: chapters.map((c) => [c.id, c.title, c.kind, c.parentId, c.orderIndex, c.wordCount, c.stage, c.publishAt, c.tags, c.updatedAt]),
           }
         : { chapters };
       const etag = 'W/"' + hashBody(JSON.stringify(body)) + '"';
@@ -122,6 +137,12 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         });
         if (!event) return reply.status(400).send({ error: 'Event not in project' });
       }
+      let stageFields;
+      try {
+        stageFields = stageFieldsOf(input, null);
+      } catch (err) {
+        return reply.status(400).send({ error: err instanceof Error ? err.message : 'Статус главы не подходит' });
+      }
       const chapter = await prisma.chapter.create({
         data: {
           projectId: req.params.projectId,
@@ -136,6 +157,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
           eventId: input.eventId ?? null,
           locationId: input.locationId ?? null,
           metadata: toJson(input.metadata),
+          ...stageFields,
         },
       });
       return reply.status(201).send({ chapter });
@@ -173,6 +195,20 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         });
         if (!parent) return reply.status(400).send({ error: 'Parent chapter not in project' });
       }
+      let currentPublishAt: Date | null = null;
+      if (input.stage === 'scheduled' && input.publishAt === undefined) {
+        const current = await prisma.chapter.findFirst({
+          where: { id: req.params.chapterId, projectId: req.params.projectId },
+          select: { publishAt: true },
+        });
+        currentPublishAt = current?.publishAt ?? null;
+      }
+      let stageFields;
+      try {
+        stageFields = stageFieldsOf(input, currentPublishAt);
+      } catch (err) {
+        return reply.status(400).send({ error: err instanceof Error ? err.message : 'Статус главы не подходит' });
+      }
       const result = await prisma.chapter.updateMany({
         where: { id: req.params.chapterId, projectId: req.params.projectId },
         data: {
@@ -187,6 +223,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
           ...(input.eventId !== undefined && { eventId: input.eventId }),
           ...(input.locationId !== undefined && { locationId: input.locationId }),
           ...(input.metadata !== undefined && { metadata: toJson(input.metadata) }),
+          ...stageFields,
         },
       });
       if (result.count === 0) return reply.status(404).send({ error: 'Chapter not found' });
