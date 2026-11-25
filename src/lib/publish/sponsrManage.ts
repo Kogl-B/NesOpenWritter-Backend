@@ -143,8 +143,10 @@ async function publicUrl(slug: string, postId: number, sess: string): Promise<st
     return fallback;
   }
   const html = await res.text();
-  const match = html.match(new RegExp(`/${slug}/${postId}/[A-Za-z0-9_-]+/`));
-  return match ? `https://sponsr.ru${match[0]}` : fallback;
+  const embedded = html.match(/"post_url":"(\/[A-Za-z0-9_./-]+)"/);
+  if (embedded) return `https://sponsr.ru${embedded[1]}`;
+  const match = html.match(new RegExp(`/${slug}/${postId}/[A-Za-z0-9_-]+`));
+  return match ? `https://sponsr.ru${match[0]}/` : fallback;
 }
 
 /** Создаёт или заменяет пост в редакторе Sponsr. Подписчиков зовёт только если это сказано. */
