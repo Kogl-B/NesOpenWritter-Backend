@@ -58,7 +58,11 @@ export async function featureRoutes(app: FastifyInstance) {
     async (req, reply) => {
       if (!(await checkProject(req, reply))) return;
       const entries = await prisma.knowledgeEntry.findMany({
-        where: { projectId: req.params.projectId },
+        where: {
+          projectId: req.params.projectId,
+          character: { projectId: req.params.projectId },
+          OR: [{ eventId: null }, { event: { projectId: req.params.projectId } }],
+        },
         include: { character: { select: { name: true } } },
       });
       return { entries };
@@ -76,8 +80,26 @@ export async function featureRoutes(app: FastifyInstance) {
         detail: z.string().max(1000).optional().nullable(),
         eventId: z.string().optional().nullable(),
       }).parse(req.body);
+      const { projectId } = req.params;
+      const [character, event, existing] = await Promise.all([
+        prisma.character.findFirst({ where: { id: input.characterId, projectId }, select: { id: true } }),
+        input.eventId == null ? true : prisma.timelineEvent.findFirst({
+          where: { id: input.eventId, projectId }, select: { id: true },
+        }),
+        prisma.knowledgeEntry.findUnique({
+          where: { characterId_topic: { characterId: input.characterId, topic: input.topic } },
+          select: { projectId: true },
+        }),
+      ]);
+      if (!character || !event) {
+        return reply.status(404).send({ error: 'Персонаж или событие не найдены в проекте' });
+      }
+      if (existing && existing.projectId !== projectId) {
+        req.log.error({ code: 'PROJECT_RELATION_MISMATCH', projectId }, 'Несогласованная запись знаний');
+        return reply.status(409).send({ error: 'Связь записи с проектом повреждена' });
+      }
       const entry = await prisma.knowledgeEntry.upsert({
-        where: { characterId_topic: { characterId: input.characterId, topic: input.topic } },
+        where: { projectId, characterId_topic: { characterId: input.characterId, topic: input.topic } },
         update: { known: input.known, detail: input.detail },
         create: { ...input, projectId: req.params.projectId },
       });
@@ -130,26 +152,30 @@ export async function featureRoutes(app: FastifyInstance) {
         isDefault: z.boolean().optional(),
         settings: z.record(z.string(), z.unknown()).optional(),
       }).parse(req.body);
-      if (input.isDefault) {
-        // основной календарь в проекте может быть только один
-        await prisma.calendar.updateMany({
-          where: { projectId: req.params.projectId },
-          data: { isDefault: false },
-        });
-      }
+      const { projectId, calendarId } = req.params;
       try {
         const { settings, ...rest } = input;
-        const calendar = await prisma.calendar.update({
-          where: { id: req.params.calendarId },
-          data: {
-            ...rest,
-            ...(settings !== undefined && {
-              settings: settings as unknown as import('@prisma/client').Prisma.InputJsonValue,
-            }),
-          },
+        const calendar = await prisma.$transaction(async (tx) => {
+          const updated = await tx.calendar.update({
+            where: { id: calendarId, projectId },
+            data: {
+              ...rest,
+              ...(settings !== undefined && {
+                settings: settings as import('@prisma/client').Prisma.InputJsonValue,
+              }),
+            },
+          });
+          if (input.isDefault) {
+            await tx.calendar.updateMany({
+              where: { projectId, id: { not: calendarId }, isDefault: true },
+              data: { isDefault: false },
+            });
+          }
+          return updated;
         });
         return { calendar };
-      } catch {
+      } catch (error) {
+        if ((error as { code?: string }).code !== 'P2025') throw error;
         return reply.status(404).send({ error: 'Календарь не найден' });
       }
     },
@@ -212,7 +238,11 @@ export async function featureRoutes(app: FastifyInstance) {
       const [pins, threads] = await Promise.all([
         prisma.investigationPin.findMany({ where: { projectId: req.params.projectId } }),
         prisma.investigationThread.findMany({
-          where: { projectId: req.params.projectId },
+          where: {
+            projectId: req.params.projectId,
+            fromPin: { projectId: req.params.projectId },
+            toPin: { projectId: req.params.projectId },
+          },
           include: {
             fromPin: { select: { id: true, label: true, x: true, y: true } },
             toPin: { select: { id: true, label: true, x: true, y: true } },
@@ -252,7 +282,11 @@ export async function featureRoutes(app: FastifyInstance) {
         toPinId: z.string(),
         label: z.string().max(100).optional().nullable(),
       }).parse(req.body);
-      // Нить без пина в ответе ломает рендер доски — всегда включаем пины
+      const pinIds = [...new Set([input.fromPinId, input.toPinId])];
+      const count = await prisma.investigationPin.count({
+        where: { id: { in: pinIds }, projectId: req.params.projectId },
+      });
+      if (count !== pinIds.length) return reply.status(404).send({ error: 'Пин не найден' });
       const thread = await prisma.investigationThread.create({
         data: { ...input, projectId: req.params.projectId },
         include: {
@@ -306,16 +340,11 @@ export async function featureRoutes(app: FastifyInstance) {
     '/api/projects/:projectId/investigation/pins/:pinId',
     async (req, reply) => {
       if (!(await checkProject(req, reply))) return;
-      try {
-        // Нити ссылаются на пин: снимаем их первыми, иначе FK не даст удалить
-        await prisma.investigationThread.deleteMany({
-          where: { OR: [{ fromPinId: req.params.pinId }, { toPinId: req.params.pinId }] },
-        });
-        await prisma.investigationPin.delete({ where: { id: req.params.pinId } });
-        return reply.status(204).send();
-      } catch {
-        return reply.status(404).send({ error: 'Пин не найден' });
-      }
+      const result = await prisma.investigationPin.deleteMany({
+        where: { id: req.params.pinId, projectId: req.params.projectId },
+      });
+      if (!result.count) return reply.status(404).send({ error: 'Пин не найден' });
+      return reply.status(204).send();
     },
   );
 

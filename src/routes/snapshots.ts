@@ -78,6 +78,11 @@ export async function snapshotRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = snapshotCreateSchema.parse(req.body);
+      if (input.eventId && !await prisma.timelineEvent.findFirst({
+        where: { id: input.eventId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
 
       // Capture world state at this moment
       const [characters, items, locations, events, relations] = await Promise.all([
@@ -172,14 +177,11 @@ export async function snapshotRoutes(app: FastifyInstance) {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
-      try {
-        await prisma.worldSnapshot.delete({
-          where: { id: req.params.snapshotId },
-        });
-        return reply.status(204).send();
-      } catch {
-        return reply.status(404).send({ error: 'Snapshot not found' });
-      }
+      const result = await prisma.worldSnapshot.deleteMany({
+        where: { id: req.params.snapshotId, projectId: req.params.projectId },
+      });
+      if (!result.count) return reply.status(404).send({ error: 'Snapshot not found' });
+      return reply.status(204).send();
     },
   );
 }

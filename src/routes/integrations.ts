@@ -19,7 +19,7 @@ const driveCookieOptions = {
   sameSite: 'lax' as const,
 };
 
-const restoreSchema = z.object({ fileId: z.string().min(1) });
+const restoreSchema = z.object({ fileId: z.string().min(1).max(256).regex(/^[A-Za-z0-9_-]+$/) });
 
 function backupFileName(projectName: string): string {
   const now = new Date();

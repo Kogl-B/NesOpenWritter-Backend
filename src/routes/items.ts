@@ -53,6 +53,16 @@ export const itemRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = itemCreateSchema.parse(req.body);
+      if (input.currentOwnerId && !await prisma.character.findFirst({
+        where: { id: input.currentOwnerId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
+      if (input.currentLocationId && !await prisma.location.findFirst({
+        where: { id: input.currentLocationId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
       const item = await prisma.item.create({
         data: {
           projectId: req.params.projectId,
@@ -94,6 +104,16 @@ export const itemRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = itemUpdateSchema.parse(req.body);
+      if (input.currentOwnerId && !await prisma.character.findFirst({
+        where: { id: input.currentOwnerId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
+      if (input.currentLocationId && !await prisma.location.findFirst({
+        where: { id: input.currentLocationId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
       const result = await prisma.item.updateMany({
         where: { id: req.params.itemId, projectId: req.params.projectId },
         data: {
@@ -165,6 +185,21 @@ export const itemRoutes: FastifyPluginAsync = async (app) => {
       });
       if (!item) return reply.status(404).send({ error: 'Item not found' });
       const input = itemTimelinePointCreateSchema.parse(req.body);
+      if (input.ownerId && !await prisma.character.findFirst({
+        where: { id: input.ownerId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
+      if (input.locationId && !await prisma.location.findFirst({
+        where: { id: input.locationId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
+      if (input.eventId && !await prisma.timelineEvent.findFirst({
+        where: { id: input.eventId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
       const point = await prisma.itemTimelinePoint.create({
         data: {
           projectId: req.params.projectId,
@@ -188,6 +223,21 @@ export const itemRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = itemTimelinePointUpdateSchema.parse(req.body);
+      if (input.ownerId && !await prisma.character.findFirst({
+        where: { id: input.ownerId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
+      if (input.locationId && !await prisma.location.findFirst({
+        where: { id: input.locationId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
+      if (input.eventId && !await prisma.timelineEvent.findFirst({
+        where: { id: input.eventId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
       const result = await prisma.itemTimelinePoint.updateMany({
         where: {
           id: req.params.pointId,

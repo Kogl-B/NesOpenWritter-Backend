@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 
 import { prisma } from './prisma.js';
 
@@ -159,18 +159,23 @@ export async function exportProjectFull(projectId: string): Promise<ProjectBacku
 type Row = Record<string, unknown>;
 
 function rows(v: unknown): Row[] {
-  return Array.isArray(v) ? (v as Row[]) : [];
+  return Array.isArray(v) ? v.filter((entry): entry is Row => entry !== null && typeof entry === 'object' && !Array.isArray(entry)) : [];
 }
 
-/** Копия строки без служебных полей; id выдаём сразу и запоминаем в map. */
-function takeRow(
-  src: Row,
-  map: Map<string, string>
-): { id: string; data: Row } {
-  const oldId = typeof src.id === 'string' ? src.id : '';
+// Prisma's nested writes and foreign keys may never be supplied by a backup.
+const importedScalarFields = new Map(Prisma.dmmf.datamodel.models.map(model => {
+  const foreignKeys = new Set(model.fields.flatMap(field => field.relationFromFields ?? []));
+  return [model.name, new Set(model.fields
+    .filter(field => field.kind !== 'object' && !foreignKeys.has(field.name))
+    .map(field => field.name))] as const;
+}));
+
+function takeRow(model: Prisma.ModelName, src: Row, map: Map<string, string>): { id: string; data: Row } {
   const id = randomUUID();
-  if (oldId) map.set(oldId, id);
-  const data: Row = { ...src, id };
+  if (typeof src.id === 'string' && src.id) map.set(src.id, id);
+  const fields = importedScalarFields.get(model)!;
+  const data: Row = Object.fromEntries(Object.entries(src).filter(([key]) => fields.has(key)));
+  data.id = id;
   delete data.createdAt;
   delete data.updatedAt;
   return { id, data };
@@ -209,7 +214,8 @@ export async function restoreProjectFull(
   backup: ProjectBackup,
   nameSuffix = '(восстановлено)'
 ): Promise<RestoreResult> {
-  if (!backup || backup.app !== 'nesopenwritter' || !backup.tables) {
+  if (!backup || backup.app !== 'nesopenwritter' || !backup.tables || Array.isArray(backup.tables)
+      || typeof backup.tables !== 'object' || typeof backup.project?.name !== 'string') {
     throw Object.assign(new Error('Файл не похож на бэкап OpenWritter'), { statusCode: 400 });
   }
   const t = backup.tables;
@@ -248,7 +254,7 @@ export async function restoreProjectFull(
 
     // Локации (дерево)
     for (const src of byParentDepth(rows(t.locations), 'parentLocationId')) {
-      const { data } = takeRow(src, m.location);
+      const { data } = takeRow('Location', src, m.location);
       data.projectId = project.id;
       data.parentLocationId = ref(m.location, src.parentLocationId);
       await tx.location.create({ data: data as never });
@@ -257,13 +263,13 @@ export async function restoreProjectFull(
 
     // Персонажи
     for (const src of rows(t.characters)) {
-      const { data } = takeRow(src, m.character);
+      const { data } = takeRow('Character', src, m.character);
       data.projectId = project.id;
       await tx.character.create({ data: data as never });
       counts.characters = (counts.characters ?? 0) + 1;
     }
     for (const src of rows(t.characterRelations)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('CharacterRelation', src, new Map());
       data.projectId = project.id;
       data.fromCharacterId = ref(m.character, src.fromCharacterId) ?? '';
       data.toCharacterId = ref(m.character, src.toCharacterId) ?? '';
@@ -273,7 +279,7 @@ export async function restoreProjectFull(
       }
     }
     for (const src of rows(t.genealogyEdges)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('GenealogyEdge', src, new Map());
       data.projectId = project.id;
       data.parentId = ref(m.character, src.parentId) ?? '';
       data.childId = ref(m.character, src.childId) ?? '';
@@ -285,7 +291,7 @@ export async function restoreProjectFull(
 
     // Предметы
     for (const src of rows(t.items)) {
-      const { data } = takeRow(src, m.item);
+      const { data } = takeRow('Item', src, m.item);
       data.projectId = project.id;
       data.currentOwnerId = ref(m.character, src.currentOwnerId);
       data.currentLocationId = ref(m.location, src.currentLocationId);
@@ -295,7 +301,7 @@ export async function restoreProjectFull(
 
     // Теги + связи
     for (const src of rows(t.tags)) {
-      const { data } = takeRow(src, m.tag);
+      const { data } = takeRow('Tag', src, m.tag);
       data.projectId = project.id;
       await tx.tag.create({ data: data as never });
       counts.tags = (counts.tags ?? 0) + 1;
@@ -314,7 +320,7 @@ export async function restoreProjectFull(
 
     // События
     for (const src of rows(t.events)) {
-      const { data } = takeRow(src, m.event);
+      const { data } = takeRow('TimelineEvent', src, m.event);
       data.projectId = project.id;
       data.locationId = ref(m.location, src.locationId);
       await tx.timelineEvent.create({ data: data as never });
@@ -345,7 +351,7 @@ export async function restoreProjectFull(
     }
     const positionRows = rows(t.characterPositions)
       .map((src) => {
-        const { data } = takeRow(src, new Map());
+        const { data } = takeRow('CharacterPosition', src, new Map());
         data.projectId = project.id;
         data.characterId = ref(m.character, src.characterId) ?? '';
         data.eventId = ref(m.event, src.eventId) ?? '';
@@ -359,7 +365,7 @@ export async function restoreProjectFull(
     }
     const itemTimelineRows = rows(t.itemTimelinePoints)
       .map((src) => {
-        const { data } = takeRow(src, new Map());
+        const { data } = takeRow('ItemTimelinePoint', src, new Map());
         data.projectId = project.id;
         data.itemId = ref(m.item, src.itemId) ?? '';
         data.ownerId = ref(m.character, src.ownerId);
@@ -375,7 +381,7 @@ export async function restoreProjectFull(
 
     // Главы (дерево) + ревизии
     for (const src of byParentDepth(rows(t.chapters), 'parentId')) {
-      const { data } = takeRow(src, m.chapter);
+      const { data } = takeRow('Chapter', src, m.chapter);
       data.projectId = project.id;
       data.parentId = ref(m.chapter, src.parentId);
       data.eventId = ref(m.event, src.eventId);
@@ -384,8 +390,9 @@ export async function restoreProjectFull(
       counts.chapters = (counts.chapters ?? 0) + 1;
     }
     for (const src of rows(t.chapterRevisions)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('ChapterRevision', src, new Map());
       data.chapterId = ref(m.chapter, src.chapterId) ?? '';
+      data.authorId = src.authorId === ownerId ? ownerId : null;
       if (data.chapterId) {
         await tx.chapterRevision.create({ data: data as never });
         counts.chapterRevisions = (counts.chapterRevisions ?? 0) + 1;
@@ -394,14 +401,14 @@ export async function restoreProjectFull(
 
     // Карта
     for (const src of rows(t.mapElements)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('MapElement', src, new Map());
       data.projectId = project.id;
       data.locationId = ref(m.location, src.locationId);
       await tx.mapElement.create({ data: data as never });
       counts.mapElements = (counts.mapElements ?? 0) + 1;
     }
     for (const src of rows(t.mapDrawings)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('MapDrawing', src, new Map());
       data.projectId = project.id;
       await tx.mapDrawing.create({ data: data as never });
       counts.mapDrawings = (counts.mapDrawings ?? 0) + 1;
@@ -409,7 +416,7 @@ export async function restoreProjectFull(
 
     // Вики
     for (const src of rows(t.wikiPages)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('WikiPage', src, new Map());
       data.projectId = project.id;
       await tx.wikiPage.create({ data: data as never });
       counts.wikiPages = (counts.wikiPages ?? 0) + 1;
@@ -417,7 +424,7 @@ export async function restoreProjectFull(
 
     // Снимки мира
     for (const src of rows(t.snapshots)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('WorldSnapshot', src, new Map());
       data.projectId = project.id;
       data.eventId = ref(m.event, src.eventId);
       await tx.worldSnapshot.create({ data: data as never });
@@ -426,20 +433,20 @@ export async function restoreProjectFull(
 
     // Экономика
     for (const src of rows(t.currencies)) {
-      const { data } = takeRow(src, m.currency);
+      const { data } = takeRow('Currency', src, m.currency);
       data.projectId = project.id;
       await tx.currency.create({ data: data as never });
       counts.currencies = (counts.currencies ?? 0) + 1;
     }
     for (const src of rows(t.resources)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('Resource', src, new Map());
       data.projectId = project.id;
       data.currencyId = ref(m.currency, src.currencyId);
       await tx.resource.create({ data: data as never });
       counts.resources = (counts.resources ?? 0) + 1;
     }
     for (const src of rows(t.tradeRoutes)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('TradeRoute', src, new Map());
       data.projectId = project.id;
       data.fromLocationId = ref(m.location, src.fromLocationId);
       data.toLocationId = ref(m.location, src.toLocationId);
@@ -449,7 +456,7 @@ export async function restoreProjectFull(
 
     // Знания персонажей
     for (const src of rows(t.knowledgeEntries)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('KnowledgeEntry', src, new Map());
       data.projectId = project.id;
       data.characterId = ref(m.character, src.characterId) ?? '';
       data.eventId = ref(m.event, src.eventId);
@@ -461,19 +468,19 @@ export async function restoreProjectFull(
 
     // Календари, наследование черт, доска расследований
     for (const src of rows(t.calendars)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('Calendar', src, new Map());
       data.projectId = project.id;
       await tx.calendar.create({ data: data as never });
       counts.calendars = (counts.calendars ?? 0) + 1;
     }
     for (const src of rows(t.traits)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('TraitInheritance', src, new Map());
       data.projectId = project.id;
       await tx.traitInheritance.create({ data: data as never });
       counts.traits = (counts.traits ?? 0) + 1;
     }
     for (const src of rows(t.investigationPins)) {
-      const { data } = takeRow(src, m.pin);
+      const { data } = takeRow('InvestigationPin', src, m.pin);
       data.projectId = project.id;
       const em = entityTypeMap(src.entityType);
       data.entityId = em ? ref(em, src.entityId) : null;
@@ -481,7 +488,7 @@ export async function restoreProjectFull(
       counts.investigationPins = (counts.investigationPins ?? 0) + 1;
     }
     for (const src of rows(t.investigationThreads)) {
-      const { data } = takeRow(src, new Map());
+      const { data } = takeRow('InvestigationThread', src, new Map());
       data.projectId = project.id;
       data.fromPinId = ref(m.pin, src.fromPinId) ?? '';
       data.toPinId = ref(m.pin, src.toPinId) ?? '';

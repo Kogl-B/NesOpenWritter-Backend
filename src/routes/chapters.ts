@@ -123,6 +123,11 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = chapterCreateSchema.parse(req.body);
+      if (input.locationId && !await prisma.location.findFirst({
+        where: { id: input.locationId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
       if (input.parentId) {
         const parent = await prisma.chapter.findFirst({
           where: { id: input.parentId, projectId: req.params.projectId },
@@ -185,6 +190,16 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = chapterUpdateSchema.parse(req.body);
+      if (input.eventId && !await prisma.timelineEvent.findFirst({
+        where: { id: input.eventId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
+      if (input.locationId && !await prisma.location.findFirst({
+        where: { id: input.locationId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
       if (input.parentId && input.parentId === req.params.chapterId) {
         return reply.status(400).send({ error: 'Chapter cannot be its own parent' });
       }

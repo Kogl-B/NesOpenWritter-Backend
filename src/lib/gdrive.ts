@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { prisma } from './prisma.js';
 import { env } from './env.js';
 import { logger } from './logger.js';
+import { readDriveToken, sealDriveToken } from './driveTokenStorage.js';
 
 /**
  * Google Drive клиента без SDK — OAuth-флоу (drive.file) + загрузка/чтение
@@ -48,6 +49,8 @@ async function tokenRequest(body: Record<string, string>): Promise<TokenResponse
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(body).toString(),
+    redirect: 'error',
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
     throw Object.assign(new Error(`Google token error: ${res.status}`), {
@@ -64,34 +67,38 @@ export interface GdriveTokens {
 
 /** Актуальный access-токен пользователя: из БД + refresh при истечении. */
 export async function getValidAccessToken(userId: string): Promise<GdriveTokens> {
-  const integration = await prisma.userIntegration.findUnique({
-    where: { userId_provider: { userId, provider: 'gdrive' } },
-  });
-  if (!integration?.refreshToken) {
-    throw Object.assign(new Error('Google Диск не подключён'), { statusCode: 400 });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const integration = await prisma.userIntegration.findUnique({
+      where: { userId_provider: { userId, provider: 'gdrive' } },
+    });
+    if (!integration?.refreshToken) {
+      throw Object.assign(new Error('Google Диск не подключён'), { statusCode: 400 });
+    }
+    const email = integration.email ?? undefined;
+    if (integration.accessToken && integration.expiresAt && integration.expiresAt.getTime() > Date.now() + 60_000) {
+      return { accessToken: readDriveToken(integration.accessToken, userId, 'access'), email };
+    }
+    const refresh = readDriveToken(integration.refreshToken, userId, 'refresh');
+    const refreshed = await tokenRequest({
+      client_id: env.GOOGLE_CLIENT_ID!,
+      client_secret: env.GOOGLE_CLIENT_SECRET!,
+      grant_type: 'refresh_token',
+      refresh_token: refresh,
+    });
+    const saved = await prisma.userIntegration.updateMany({
+      where: {
+        id: integration.id, updatedAt: integration.updatedAt,
+        accessToken: integration.accessToken, refreshToken: integration.refreshToken,
+      },
+      data: {
+        accessToken: sealDriveToken(refreshed.access_token, userId, 'access'),
+        refreshToken: sealDriveToken(refreshed.refresh_token ?? refresh, userId, 'refresh'),
+        expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
+      },
+    });
+    if (saved.count) return { accessToken: refreshed.access_token, email };
   }
-  const stillValid =
-    integration.accessToken &&
-    integration.expiresAt &&
-    integration.expiresAt.getTime() > Date.now() + 60_000;
-  if (stillValid) {
-    return { accessToken: integration.accessToken!, email: integration.email ?? undefined };
-  }
-  const refreshed = await tokenRequest({
-    client_id: env.GOOGLE_CLIENT_ID!,
-    client_secret: env.GOOGLE_CLIENT_SECRET!,
-    grant_type: 'refresh_token',
-    refresh_token: integration.refreshToken,
-  });
-  await prisma.userIntegration.update({
-    where: { id: integration.id },
-    data: {
-      accessToken: refreshed.access_token,
-      expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
-      ...(refreshed.refresh_token ? { refreshToken: refreshed.refresh_token } : {}),
-    },
-  });
-  return { accessToken: refreshed.access_token, email: integration.email ?? undefined };
+  throw Object.assign(new Error('Подключение Google Диска изменилось. Повторите запрос.'), { statusCode: 409 });
 }
 
 export async function exchangeCodeAndSave(code: string, userId: string, origin: string, verifier: string): Promise<void> {
@@ -113,24 +120,28 @@ export async function exchangeCodeAndSave(code: string, userId: string, origin: 
   try {
     const info = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
+      redirect: 'error',
+      signal: AbortSignal.timeout(15_000),
     });
     if (info.ok) email = ((await info.json()) as { email?: string }).email;
   } catch {
     /* не критично */
   }
+  const accessToken = sealDriveToken(tokens.access_token, userId, 'access');
+  const refreshToken = sealDriveToken(tokens.refresh_token, userId, 'refresh');
   await prisma.userIntegration.upsert({
     where: { userId_provider: { userId, provider: 'gdrive' } },
     create: {
       userId,
       provider: 'gdrive',
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
+      accessToken,
+      refreshToken,
       expiresAt: new Date(Date.now() + tokens.expires_in * 1000),
       email,
     },
     update: {
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
+      accessToken,
+      refreshToken,
       expiresAt: new Date(Date.now() + tokens.expires_in * 1000),
       email,
     },
@@ -145,20 +156,17 @@ async function driveFetch(
   const { accessToken } = await getValidAccessToken(userId);
   const res = await fetch(url, {
     ...init,
+    redirect: 'error',
+    signal: AbortSignal.timeout(60_000),
     headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${accessToken}` },
   });
   if (res.status === 401) {
-    // токен отозван пользователем — интеграцию сбрасываем
-    await prisma.userIntegration
-      .deleteMany({ where: { userId, provider: 'gdrive' } })
-      .catch(() => undefined);
     throw Object.assign(new Error('Доступ к Google Диску отозван — подключите заново'), {
       statusCode: 400,
     });
   }
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    logger.warn(`gdrive ${url.slice(0, 80)} → ${res.status}: ${text.slice(0, 200)}`);
+    logger.warn({ code: 'GDRIVE_REQUEST_FAILED', status: res.status }, 'Google Drive request failed');
     throw Object.assign(new Error(`Google Drive error: ${res.status}`), { statusCode: 502 });
   }
   return res;
@@ -237,7 +245,7 @@ export async function listBackups(userId: string): Promise<DriveFileMeta[]> {
 export async function downloadFile(userId: string, fileId: string): Promise<string> {
   const res = await driveFetch(
     userId,
-    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`
   );
   return await res.text();
 }

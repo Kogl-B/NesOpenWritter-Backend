@@ -394,6 +394,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = characterPositionUpdateSchema.parse(req.body);
+      if (input.locationId && !await prisma.location.findFirst({
+        where: { id: input.locationId, projectId: req.params.projectId }, select: { id: true },
+      })) {
+        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      }
       const result = await prisma.characterPosition.updateMany({
         where: { id: req.params.positionId, projectId: req.params.projectId },
         data: {

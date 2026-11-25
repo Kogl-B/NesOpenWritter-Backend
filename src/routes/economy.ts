@@ -110,12 +110,11 @@ export async function economyRoutes(app: FastifyInstance) {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
-      try {
-        await prisma.currency.delete({ where: { id: req.params.currencyId } });
-        return reply.status(204).send();
-      } catch {
-        return reply.status(404).send({ error: 'Currency not found' });
-      }
+      const result = await prisma.currency.deleteMany({
+        where: { id: req.params.currencyId, projectId: req.params.projectId },
+      });
+      if (!result.count) return reply.status(404).send({ error: 'Currency not found' });
+      return reply.status(204).send();
     },
   );
 
@@ -213,12 +212,11 @@ export async function economyRoutes(app: FastifyInstance) {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
-      try {
-        await prisma.resource.delete({ where: { id: req.params.resourceId } });
-        return reply.status(204).send();
-      } catch {
-        return reply.status(404).send({ error: 'Resource not found' });
-      }
+      const result = await prisma.resource.deleteMany({
+        where: { id: req.params.resourceId, projectId: req.params.projectId },
+      });
+      if (!result.count) return reply.status(404).send({ error: 'Resource not found' });
+      return reply.status(204).send();
     },
   );
 
@@ -231,7 +229,13 @@ export async function economyRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const routes = await prisma.tradeRoute.findMany({
-        where: { projectId: req.params.projectId },
+        where: {
+          projectId: req.params.projectId,
+          AND: [
+            { OR: [{ fromLocationId: null }, { fromLocation: { projectId: req.params.projectId } }] },
+            { OR: [{ toLocationId: null }, { toLocation: { projectId: req.params.projectId } }] },
+          ],
+        },
         include: {
           fromLocation: { select: { id: true, name: true } },
           toLocation: { select: { id: true, name: true } },
@@ -249,6 +253,12 @@ export async function economyRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = tradeRouteSchema.parse(req.body);
+      const locationIds = [...new Set([input.fromLocationId, input.toLocationId].filter((id): id is string => id != null))];
+      if (locationIds.length && await prisma.location.count({
+        where: { id: { in: locationIds }, projectId: req.params.projectId },
+      }) !== locationIds.length) {
+        return reply.status(404).send({ error: 'Локация не найдена' });
+      }
       const route = await prisma.tradeRoute.create({
         data: { ...input, projectId: req.params.projectId },
         include: {
@@ -282,12 +292,11 @@ export async function economyRoutes(app: FastifyInstance) {
       if (input.fromLocationId && input.toLocationId && input.fromLocationId === input.toLocationId) {
         return reply.status(400).send({ error: 'Откуда и куда должны различаться' });
       }
-      for (const id of [input.fromLocationId, input.toLocationId]) {
-        if (!id) continue;
-        const location = await prisma.location.findFirst({
-          where: { id, projectId: req.params.projectId },
-        });
-        if (!location) return reply.status(400).send({ error: 'Локация не найдена' });
+      const locationIds = [...new Set([input.fromLocationId, input.toLocationId].filter((id): id is string => id != null))];
+      if (locationIds.length && await prisma.location.count({
+        where: { id: { in: locationIds }, projectId: req.params.projectId },
+      }) !== locationIds.length) {
+        return reply.status(404).send({ error: 'Локация не найдена' });
       }
       const result = await prisma.tradeRoute.updateMany({
         where: { id: req.params.routeId, projectId: req.params.projectId },
@@ -312,12 +321,11 @@ export async function economyRoutes(app: FastifyInstance) {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
-      try {
-        await prisma.tradeRoute.delete({ where: { id: req.params.routeId } });
-        return reply.status(204).send();
-      } catch {
-        return reply.status(404).send({ error: 'Trade route not found' });
-      }
+      const result = await prisma.tradeRoute.deleteMany({
+        where: { id: req.params.routeId, projectId: req.params.projectId },
+      });
+      if (!result.count) return reply.status(404).send({ error: 'Trade route not found' });
+      return reply.status(204).send();
     },
   );
 }
