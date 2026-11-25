@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { prisma } from './prisma.js';
 
 export const VISIT_AREAS = [
@@ -35,44 +36,64 @@ export function safeAdHref(href: string): boolean {
 }
 
 const recent = new Map<string, number>();
+const inFlight = new Map<string, Promise<void>>();
 
-/** Короткий замок в памяти процесса. Адрес никуда не пишется. */
-export function recentlySeen(key: string, windowMs: number): boolean {
-  const now = Date.now();
-  const prev = recent.get(key) ?? 0;
-  if (now - prev < windowMs) return true;
-  recent.set(key, now);
-  if (recent.size > 4000) {
-    const cutoff = now - windowMs;
-    for (const [name, at] of recent) {
-      if (at < cutoff) recent.delete(name);
+let cachedDay = '';
+const storedBrowsersToday = new Set<string>();
+
+export async function recordVisit(area: VisitArea, marker: string, browserId?: string): Promise<void> {
+  const key = `view:${marker}:${area}`;
+  await recordOnce(key, 1500, async () => {
+    const day = dayKey();
+    if (cachedDay !== day) {
+      cachedDay = day;
+      storedBrowsersToday.clear();
     }
-    if (recent.size > 4000) recent.clear();
-  }
-  return false;
+
+    if (!browserId || storedBrowsersToday.has(browserId)) {
+      await bumpMetric('view', area, day);
+      return;
+    }
+
+    // The unique key is shared across processes. Both counters commit together.
+    const hash = createHash('sha256').update(browserId).digest();
+    await prisma.$executeRaw`
+      WITH browser_visit AS (
+        INSERT INTO daily_browser_visits (day, "browserHash") VALUES (${day}, ${hash})
+        ON CONFLICT DO NOTHING
+      )
+      INSERT INTO daily_metrics (day, kind, bucket, total) VALUES (${day}, 'view', ${area}, 1)
+      ON CONFLICT (day, kind, bucket) DO UPDATE SET total = daily_metrics.total + 1
+    `;
+    if (cachedDay === day && storedBrowsersToday.size < 20_000) storedBrowsersToday.add(browserId);
+  });
 }
 
-let uniqueDay = '';
-const uniqueVisitors = new Set<string>();
+export async function recordOnce(key: string, windowMs: number, record: () => Promise<void>): Promise<void> {
+  const pending = inFlight.get(key);
+  if (pending) return pending;
+  if ((recent.get(key) ?? 0) > Date.now()) return;
 
-/** Один браузер за сутки. После перезапуска процесса счётчик может прибавить ещё раз. */
-export function claimDailyUnique(marker: string, day: string): boolean {
-  if (uniqueDay !== day) {
-    uniqueDay = day;
-    uniqueVisitors.clear();
+  const request = Promise.resolve().then(record).then(() => {
+    recent.delete(key);
+    recent.set(key, Date.now() + windowMs);
+    if (recent.size > 4000) {
+      const oldest = recent.keys().next().value;
+      if (oldest !== undefined) recent.delete(oldest);
+    }
+  });
+  inFlight.set(key, request);
+  try {
+    await request;
+  } finally {
+    inFlight.delete(key);
   }
-  if (uniqueVisitors.has(marker)) return false;
-  if (uniqueVisitors.size >= 20000) return false;
-  uniqueVisitors.add(marker);
-  return true;
 }
 
-export async function bumpMetric(kind: string, bucket: string, by = 1): Promise<void> {
-  const day = dayKey();
+export async function bumpMetric(kind: string, bucket: string, day = dayKey()): Promise<void> {
   await prisma.$executeRaw`
     INSERT INTO daily_metrics (day, kind, bucket, total)
-    VALUES (${day}, ${kind}, ${bucket}, ${by})
-    ON CONFLICT (day, kind, bucket)
-    DO UPDATE SET total = daily_metrics.total + ${by}
+    VALUES (${day}, ${kind}, ${bucket}, 1)
+    ON CONFLICT (day, kind, bucket) DO UPDATE SET total = daily_metrics.total + 1
   `;
 }

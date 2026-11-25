@@ -48,10 +48,14 @@ interface NamedCount {
 }
 
 export async function loadSiteStats() {
-  const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  const from14 = dayKey(new Date(Date.now() - 13 * 24 * 60 * 60 * 1000));
-  const from7 = dayKey(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000));
-  const [scalarRows, textAvgRows, planRows, metricRows, ads, topBookRows, topChapterRows, topReaderRows] = await Promise.all([
+  const now = Date.now();
+  const today = dayKey(new Date(now));
+  const dayBefore = (days: number) => dayKey(new Date(now - days * 86_400_000));
+  const since30 = new Date(now - 30 * 86_400_000);
+  const from30 = dayBefore(29);
+  const from14 = dayBefore(13);
+  const from7 = dayBefore(6);
+  const [scalarRows, textAvgRows, planRows, metricRows, browserRows, ads, topBookRows, topChapterRows, topReaderRows] = await Promise.all([
     prisma.$queryRaw<ScalarRow[]>`
       SELECT
         (SELECT COUNT(*)::int FROM projects) AS books,
@@ -89,7 +93,21 @@ export async function loadSiteStats() {
       ) sized
     `,
     prisma.user.groupBy({ by: ['plan'], _count: true }),
-    prisma.dailyMetric.findMany({ where: { day: { gte: from14 } } }),
+    prisma.dailyMetric.findMany({ where: {
+      OR: [
+        { day: { gte: from14, lte: today } },
+        { day: { gte: from30, lt: from14 }, kind: { in: ['ad_show', 'ad_click'] } },
+      ],
+    } }),
+    prisma.$queryRaw<Array<{ period: 'daily' | 'weekly' | 'start'; day: string | null; total: bigint }>>`
+      SELECT 'daily' AS period, day, COUNT(*) AS total
+      FROM daily_browser_visits WHERE day BETWEEN ${from14} AND ${today} GROUP BY day
+      UNION ALL
+      SELECT 'weekly', NULL, COUNT(DISTINCT "browserHash")
+      FROM daily_browser_visits WHERE day BETWEEN ${from7} AND ${today}
+      UNION ALL
+      SELECT 'start', MIN(day), 0::bigint FROM daily_browser_visits
+    `,
     prisma.houseAd.findMany({ orderBy: { sort: 'asc' } }),
     prisma.$queryRaw<NamedCount[]>`
       SELECT rp."projectId" AS "projectId",
@@ -147,28 +165,26 @@ export async function loadSiteStats() {
     : [];
   const readerById = new Map(readerUsers.map((user) => [user.id, user]));
   let views7 = 0;
-  let uniques7 = 0;
   let views14 = 0;
   let adShows7 = 0;
   let adClicks7 = 0;
-  const dayMap = new Map<string, { views: number; uniques: number; adShows: number; adClicks: number }>();
+  const uniques7 = num(browserRows.find((item) => item.period === 'weekly')?.total);
+  const uniqueSince = browserRows.find((item) => item.period === 'start')?.day ?? null;
+  const emptyDay = () => ({ views: 0, uniques: 0, legacyUniques: 0, adShows: 0, adClicks: 0 });
+  const dayMap = new Map<string, ReturnType<typeof emptyDay>>();
   const areaMap = new Map<string, number>();
   const adMap = new Map<string, { shows7: number; clicks7: number; shows30: number; clicks30: number }>();
   for (const metric of metricRows) {
     const total = num(metric.total);
     const fresh = metric.day >= from7;
-    if (metric.kind === 'view') {
+    const day = metric.day >= from14 ? dayMap.get(metric.day) ?? emptyDay() : undefined;
+    if (metric.kind === 'view' && day) {
       views14 += total;
       if (fresh) views7 += total;
       areaMap.set(metric.bucket, (areaMap.get(metric.bucket) ?? 0) + total);
-      const day = dayMap.get(metric.day) ?? { views: 0, uniques: 0, adShows: 0, adClicks: 0 };
       day.views += total;
-      dayMap.set(metric.day, day);
-    } else if (metric.kind === 'unique') {
-      if (fresh) uniques7 += total;
-      const day = dayMap.get(metric.day) ?? { views: 0, uniques: 0, adShows: 0, adClicks: 0 };
-      day.uniques += total;
-      dayMap.set(metric.day, day);
+    } else if (metric.kind === 'unique' && day) {
+      day.legacyUniques += total;
     } else if (metric.kind === 'ad_show' || metric.kind === 'ad_click') {
       const slot = adMap.get(metric.bucket) ?? { shows7: 0, clicks7: 0, shows30: 0, clicks30: 0 };
       if (metric.kind === 'ad_show') {
@@ -177,21 +193,24 @@ export async function loadSiteStats() {
           slot.shows7 += total;
           adShows7 += total;
         }
-        const day = dayMap.get(metric.day) ?? { views: 0, uniques: 0, adShows: 0, adClicks: 0 };
-        day.adShows += total;
-        dayMap.set(metric.day, day);
+        if (day) day.adShows += total;
       } else {
         slot.clicks30 += total;
         if (fresh) {
           slot.clicks7 += total;
           adClicks7 += total;
         }
-        const day = dayMap.get(metric.day) ?? { views: 0, uniques: 0, adShows: 0, adClicks: 0 };
-        day.adClicks += total;
-        dayMap.set(metric.day, day);
+        if (day) day.adClicks += total;
       }
       adMap.set(metric.bucket, slot);
     }
+    if (day) dayMap.set(metric.day, day);
+  }
+  for (const row of browserRows) {
+    if (row.period !== 'daily' || !row.day) continue;
+    const day = dayMap.get(row.day) ?? emptyDay();
+    day.uniques = num(row.total);
+    dayMap.set(row.day, day);
   }
   const plans = new Map<string, number>();
   for (const plan of planRows) {
@@ -234,6 +253,7 @@ export async function loadSiteStats() {
     plans: [...plans.entries()].map(([plan, count]) => ({ plan, count })).sort((a, b) => b.count - a.count),
     views7,
     uniques7,
+    uniqueSince,
     views14,
     adShows7,
     adClicks7,

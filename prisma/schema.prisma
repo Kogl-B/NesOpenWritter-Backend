@@ -1224,6 +1224,15 @@ model DailyMetric {
   @@map("daily_metrics")
 }
 
+/// Уникальный профиль браузера за сутки, с хешем случайного идентификатора.
+model DailyBrowserVisit {
+  day         String
+  browserHash Bytes
+
+  @@id([day, browserHash])
+  @@map("daily_browser_visits")
+}
+
 /// Сколько человек дочитал главу. Хранится максимум, повторный заход строку не плодит.
 model ReadProgress {
   userId    String

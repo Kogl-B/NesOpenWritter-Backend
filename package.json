@@ -14,6 +14,7 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/lib/nowpayments.test.ts src/lib/publish/publish.test.ts src/lib/publish/kit.test.ts src/lib/publish/boostySession.test.ts src/lib/publish/boostyPost.test.ts src/lib/publish/sponsrClient.test.ts src/lib/publish/sponsrSession.test.ts src/lib/publish/sponsrManage.test.ts src/lib/chapterStage.test.ts src/lib/ai/openaiImage.test.ts src/lib/ai/receipt.test.ts src/lib/geo/policy.test.ts src/lib/geo/lookup.test.ts src/lib/notify/drafts.test.ts",
+    "test:stats": "tsx --test src/routes/metrics.integration.test.ts",
     "lint": "eslint src --max-warnings 0",
     "format": "prettier --write \"src/**/*.ts\"",
     "db:up": "docker compose up -d",
