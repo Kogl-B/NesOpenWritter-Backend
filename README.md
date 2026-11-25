@@ -180,3 +180,20 @@ Better-Auth работает на **HttpOnly cookies**, поэтому фрон�
 | [NesOpenWritter](https://github.com/Kogl-B/NesOpenWritter) | Frontend (Vite + React), деплой на Vercel |
 | [NesOpenWritter-Backend](https://github.com/Kogl-B/NesOpenWritter-Backend) | Этот сервис, деплой на Railway |
 | `@kogl-b/openwritter-shared` | Общие TS-типы/Zod-схемы (GitHub Packages, отдельный репо) |
+
+## Реклама OpenWritter
+
+Откройте `/admin?section=advertising` под администратором. Во вкладке «Публикации» укажите рекламодателя, текст, цену, период и место показа. Полученную оплату отмечает администратор. Публикация появляется в активном статусе в пределах оплаченного периода. Для одного рекламного места выберите непересекающиеся периоды оплаченных активных публикаций. На выбранном месте она имеет приоритет перед AdSense и встроенным блоком.
+
+### Подключение AdSense
+
+1. Во вкладке AdSense сохраните ID вашего издателя. Проверьте `https://openwritter.app/ads.txt` и подтвердите домен в AdSense. Дождитесь статуса Ready и создайте по одному адаптивному блоку для каждого выбранного места. [Проверка сайта и ads.txt в AdSense](https://support.google.com/adsense/answer/12170222)
+2. Настройте Cookiebot TCF для домена и проверьте доступность выбора Google Advertising Products и смены согласия. В админке сохраните ID группы доменов Cookiebot и ID рекламных блоков. [Установка Cookiebot TCF](https://support.cookiebot.com/hc/en-us/articles/360007652694-Cookiebot-CMP-and-the-Transparency-and-Consent-Framework-TCF)
+3. Задайте `ADSENSE_DOCUMENTS=true` и `ADSENSE_DOCUMENT_HOST=openwritter.app` в production-проекте Vercel, затем выпустите фронтенд. Для гостей на страницах с доступным блоком Vercel сможет выдать документ с индивидуальным CSP nonce. [Требования Google к CSP](https://support.google.com/adsense/answer/16283098)
+4. Задайте `ADSENSE_SERVING=true` и `ADSENSE_DOMAIN=openwritter.app` в Railway. Включите показ в админке и проверьте доставку рекламного блока с учётом выбранного согласия. Показ можно приостановить тем же переключателем.
+
+### Отчёты
+
+Ручной отчёт показывает в UTC видимые показы, открытия публикаций, переходы на сайт рекламодателя и отметки об оплате. Видимый показ блока фиксируется при видимости не менее половины блока в течение секунды. Встроенные блоки используют прежние счётчики.
+
+Для импорта Google включите AdSense Management API и оформите пользовательский OAuth-доступ `adsense.readonly`. Сохраните `ADSENSE_CLIENT_ID`, `ADSENSE_CLIENT_SECRET` и `ADSENSE_REFRESH_TOKEN` как секреты Railway. В отчёте выберите Google AdSense и загрузите данные за нужный период. Для обновления последних семи дней раз в шесть часов включите автоимпорт во вкладке AdSense. Отчёт отфильтрован по `ADSENSE_DOMAIN` и использует отчётные сутки Google в Лос-Анджелесе. Доход Google отображается как оценка в валюте ответа. [Настройка AdSense Management API](https://developers.google.com/adsense/management/getting_started)

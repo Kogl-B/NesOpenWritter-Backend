@@ -39,6 +39,7 @@ import { readerReportRoutes } from './routes/readerReports.js';
 import { errorReportRoutes } from './routes/errorReports.js';
 import { catalogRoutes } from './routes/catalog.js';
 import { metricsRoutes } from './routes/metrics.js';
+import { advertisingRoutes } from './routes/advertising.js';
 import { blogRoutes } from './routes/blog.js';
 import { publishRoutes } from './routes/publish.js';
 import { notificationRoutes } from './routes/notifications.js';
@@ -183,6 +184,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(errorReportRoutes);
   await app.register(catalogRoutes);
   await app.register(metricsRoutes);
+  await app.register(advertisingRoutes);
   await app.register(blogRoutes);
   await app.register(publishRoutes);
   await app.register(notificationRoutes);

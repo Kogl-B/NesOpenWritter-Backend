@@ -9,6 +9,12 @@ const envSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
+  ADSENSE_SERVING: z.enum(['true', 'false']).default('false'),
+  ADSENSE_DOMAIN: z.string().regex(/^[a-z0-9.-]+$/).default('openwritter.app'),
+  ADSENSE_CLIENT_ID: z.string().optional().default(''),
+  ADSENSE_CLIENT_SECRET: z.string().optional().default(''),
+  ADSENSE_REFRESH_TOKEN: z.string().optional().default(''),
+
   DATABASE_URL: z.string().url(),
 
   CORS_ORIGIN: z.string().default('http://localhost:5173'),

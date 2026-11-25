@@ -1388,3 +1388,79 @@ model GeoBlock {
   @@index([kind])
   @@map("geo_blocks")
 }
+
+model AdvertisingSettings {
+  id             String    @id
+  publisherId    String    @default("")
+  cookiebotId    String    @default("")
+  siteUnit       String    @default("")
+  readerUnit     String    @default("")
+  enabled        Boolean   @default(false)
+  autoSync       Boolean   @default(false)
+  updatedAt      DateTime  @updatedAt
+
+  @@map("advertising_settings")
+}
+
+model SponsoredPost {
+  id          String    @id @default(cuid())
+  title       String
+  summary     String
+  body        String
+  advertiser  String
+  registrationId String @default("")
+  imageUrl    String @default("")
+  href        String    @default("")
+  placement   String
+  state       String    @default("draft")
+  priceMinor  Int       @default(0)
+  currency    String    @default("RUB")
+  paidAt      DateTime?
+  startsAt    DateTime
+  endsAt      DateTime
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  exposures   AdExposure[]
+
+  @@index([placement, state, startsAt])
+  @@map("sponsored_posts")
+}
+
+model AdExposure {
+  id           String       @id
+  day          String
+  placement    String
+  postId       String
+  viewable     Boolean      @default(false)
+  clicked      Boolean      @default(false)
+  post         SponsoredPost @relation(fields: [postId], references: [id], onDelete: Restrict)
+
+  @@index([day, postId, placement])
+  @@map("ad_exposures")
+}
+
+model AdSenseDay {
+  publisherId   String
+  day           String
+  unit          String
+  requests      BigInt
+  matched       BigInt
+  impressions   BigInt
+  clicks        BigInt
+  earnings      Decimal  @db.Decimal(21, 6)
+  measurability Decimal? @db.Decimal(10, 9)
+  viewability   Decimal? @db.Decimal(10, 9)
+  currency      String
+
+  @@id([publisherId, day, unit])
+  @@map("adsense_days")
+}
+
+model AdSenseSync {
+  publisherId String   @id
+  from        String
+  to          String
+  syncedAt    DateTime
+
+  @@map("adsense_sync")
+}
