@@ -69,3 +69,25 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 export type Env = typeof env;
+
+
+export function browserOrigins(extra: readonly string[] = []): string[] {
+  const origins = new Set<string>();
+  for (const value of [env.FRONTEND_URL, ...env.CORS_ORIGIN.split(','), ...extra]) {
+    try {
+      const url = new URL(value.trim());
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) continue;
+      if (url.pathname !== '/' || url.search || url.hash) continue;
+      origins.add(url.origin);
+
+      if (env.NODE_ENV !== 'production') {
+        if (url.hostname === 'localhost') url.hostname = '127.0.0.1';
+        else if (url.hostname === '127.0.0.1') url.hostname = 'localhost';
+        origins.add(url.origin);
+      }
+    } catch {
+      // Entries must be literal browser origins.
+    }
+  }
+  return [...origins];
+}

@@ -3,18 +3,21 @@ import { z } from 'zod';
 
 import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership } from '../lib/access.js';
-import { isGdriveConfigured, getAuthUrl, verifyCallbackState, exchangeCodeAndSave, getValidAccessToken, uploadBackup, listBackups, downloadFile } from '../lib/gdrive.js';
+import { isGdriveConfigured, getAuthUrl, exchangeCodeAndSave, getValidAccessToken, uploadBackup, listBackups, downloadFile } from '../lib/gdrive.js';
 import { exportProjectFull, restoreProjectFull, type ProjectBackup } from '../lib/projectTransfer.js';
 import { getUserPlan, getUsageInfo } from './account.js';
 import { getTier } from '../lib/tiers.js';
-import { env } from '../lib/env.js';
+import { browserOrigins, env } from '../lib/env.js';
+import { driveOAuthAgeSeconds, driveReturnOrigin, newDriveOAuth, readDriveOAuth } from '../lib/driveOAuth.js';
 
-/** Origin текущего запроса с учётом прокси Railway. */
-function reqOrigin(req: { headers: Record<string, unknown>; protocol: string }): string {
-  const proto = (req.headers['x-forwarded-proto'] as string) ?? req.protocol;
-  const host = (req.headers['x-forwarded-host'] as string) ?? (req.headers.host as string);
-  return `${proto}://${host}`;
-}
+const driveCallbackPath = '/api/integrations/gdrive/callback';
+const driveCookie = 'nesow.drive_oauth';
+const driveCookieOptions = {
+  path: driveCallbackPath,
+  httpOnly: true,
+  secure: env.NODE_ENV === 'production',
+  sameSite: 'lax' as const,
+};
 
 const restoreSchema = z.object({ fileId: z.string().min(1) });
 
@@ -27,7 +30,10 @@ function backupFileName(projectName: string): string {
 
 export const integrationRoutes: FastifyPluginAsync = async (app) => {
   // --- OAuth -------------------------------------------------------------
-  // Старт и callback НЕ под requireAuth-хуком: туда приходит редирект Google.
+  const allowedOrigins = new Set(browserOrigins().filter(
+    (origin) => env.NODE_ENV !== 'production' || origin.startsWith('https://'),
+  ));
+  const providerOrigin = new URL(env.BETTER_AUTH_URL).origin;
 
   app.get('/api/integrations/gdrive/start', async (req, reply) => {
     app.requireAuth(req);
@@ -36,24 +42,47 @@ export const integrationRoutes: FastifyPluginAsync = async (app) => {
         error: 'Google-интеграция не настроена администратором (GOOGLE_CLIENT_ID/SECRET)',
       });
     }
-    return reply.redirect(getAuthUrl(req.user!.id, reqOrigin(req)));
+    const publicOrigin = req.headers['x-ow-public-origin'];
+    const origin = typeof publicOrigin === 'string' && allowedOrigins.has(publicOrigin)
+      ? publicOrigin : new URL(env.FRONTEND_URL).origin;
+    const flow = newDriveOAuth(req.session!.id, origin);
+    reply.setCookie(driveCookie, JSON.stringify(flow), {
+      ...driveCookieOptions, signed: true, maxAge: driveOAuthAgeSeconds,
+    });
+    return reply.redirect(getAuthUrl(flow.state, flow.verifier, providerOrigin));
   });
 
-  app.get('/api/integrations/gdrive/callback', async (req, reply) => {
+  app.get(driveCallbackPath, async (req, reply) => {
     const url = new URL(req.url, env.BETTER_AUTH_URL);
     const code = url.searchParams.get('code');
     const state = url.searchParams.get('state');
-    const err = url.searchParams.get('error');
-    const back = (ok: boolean, reason = '') =>
-      reply.redirect(`${env.FRONTEND_URL.replace(/\/$/, '')}/account?gdrive=${ok ? 'ok' : 'error'}${reason ? `&reason=${encodeURIComponent(reason)}` : ''}`);
-    if (err || !code) return back(false, err ?? 'no code');
-    const userId = verifyCallbackState(state ?? undefined);
-    if (!userId) return back(false, 'bad state');
+    const signed = req.cookies[driveCookie];
+    // Google's registered callback is on the API host. Route its response
+    // to the same frontend origin that holds the initiating session and cookie.
+    const returnOrigin = driveReturnOrigin(state);
+    if (returnOrigin && allowedOrigins.has(returnOrigin) && !signed && !url.searchParams.has('relay')) {
+      const finish = new URL(driveCallbackPath, returnOrigin);
+      finish.searchParams.set('state', state!);
+      if (code) finish.searchParams.set('code', code);
+      if (url.searchParams.has('error')) finish.searchParams.set('error', 'google');
+      finish.searchParams.set('relay', '1');
+      return reply.redirect(finish.href);
+    }
+    const cookie = signed ? req.unsignCookie(signed) : null;
+    const flow = readDriveOAuth(cookie?.valid ? cookie.value : null, state, req.session?.id);
+    const origin = flow && allowedOrigins.has(flow.origin) ? flow.origin : new URL(env.FRONTEND_URL).origin;
+    const back = (ok: boolean) => reply.redirect(`${origin}/account?gdrive=${ok ? 'ok' : 'error'}`);
+    if (signed) reply.clearCookie(driveCookie, driveCookieOptions);
+    if (!flow || !allowedOrigins.has(flow.origin) || !req.user || !code || url.searchParams.has('error')) {
+      if (signed && !flow) req.log.warn({ code: 'DRIVE_STATE_REJECTED' }, 'Google Drive callback rejected');
+      return back(false);
+    }
     try {
-      await exchangeCodeAndSave(code, userId, reqOrigin(req));
+      await exchangeCodeAndSave(code, req.user.id, providerOrigin, flow.verifier);
       return back(true);
-    } catch (e) {
-      return back(false, e instanceof Error ? e.message.slice(0, 120) : 'exchange failed');
+    } catch {
+      req.log.warn({ code: 'DRIVE_EXCHANGE_FAILED' }, 'Google Drive callback failed');
+      return back(false);
     }
   });
 

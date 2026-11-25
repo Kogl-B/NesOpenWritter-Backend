@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { prisma } from './prisma.js';
 import { env } from './env.js';
 import { logger } from './logger.js';
@@ -21,24 +21,7 @@ function redirectUri(origin: string): string {
   return `${origin.replace(/\/$/, '')}/api/integrations/gdrive/callback`;
 }
 
-/** state = userId.hmac — проверяем на callback, чтобы знать чей это код. */
-function signState(userId: string): string {
-  const hmac = createHmac('sha256', env.BETTER_AUTH_SECRET).update(userId).digest('hex').slice(0, 32);
-  return `${userId}.${hmac}`;
-}
-
-function verifyState(state: string): string | null {
-  const idx = state.lastIndexOf('.');
-  if (idx <= 0) return null;
-  const userId = state.slice(0, idx);
-  const expect = signState(userId);
-  const a = Buffer.from(state);
-  const b = Buffer.from(expect);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-  return userId;
-}
-
-export function getAuthUrl(userId: string, origin: string): string {
+export function getAuthUrl(state: string, verifier: string, origin: string): string {
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID!,
     redirect_uri: redirectUri(origin),
@@ -46,14 +29,11 @@ export function getAuthUrl(userId: string, origin: string): string {
     scope: `${DRIVE_FILE_SCOPE} https://www.googleapis.com/auth/userinfo.email`,
     access_type: 'offline',
     prompt: 'consent',
-    state: signState(userId),
+    state,
+    code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+    code_challenge_method: 'S256',
   });
   return `${AUTH_URL}?${params.toString()}`;
-}
-
-export function verifyCallbackState(state: string | undefined): string | null {
-  if (!state) return null;
-  return verifyState(state);
 }
 
 interface TokenResponse {
@@ -70,8 +50,7 @@ async function tokenRequest(body: Record<string, string>): Promise<TokenResponse
     body: new URLSearchParams(body).toString(),
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw Object.assign(new Error(`Google token error: ${res.status} ${text.slice(0, 200)}`), {
+    throw Object.assign(new Error(`Google token error: ${res.status}`), {
       statusCode: 502,
     });
   }
@@ -115,12 +94,13 @@ export async function getValidAccessToken(userId: string): Promise<GdriveTokens>
   return { accessToken: refreshed.access_token, email: integration.email ?? undefined };
 }
 
-export async function exchangeCodeAndSave(code: string, userId: string, origin: string): Promise<void> {
+export async function exchangeCodeAndSave(code: string, userId: string, origin: string, verifier: string): Promise<void> {
   const tokens = await tokenRequest({
     client_id: env.GOOGLE_CLIENT_ID!,
     client_secret: env.GOOGLE_CLIENT_SECRET!,
     grant_type: 'authorization_code',
     code,
+    code_verifier: verifier,
     redirect_uri: redirectUri(origin),
   });
   if (!tokens.refresh_token) {

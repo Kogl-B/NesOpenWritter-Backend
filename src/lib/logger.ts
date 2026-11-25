@@ -7,6 +7,12 @@ const isDev = env.NODE_ENV === 'development';
 
 export const loggerConfig: FastifyServerOptions['logger'] = {
   level: env.LOG_LEVEL,
+  serializers: {
+    req(req) {
+      // The router's pattern omits verification/reset tokens and OAuth query parameters.
+      return { method: req.method, url: req.routeOptions?.url ?? '[unmatched]' };
+    },
+  },
   ...(isDev && {
     transport: {
       target: 'pino-pretty',

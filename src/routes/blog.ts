@@ -1,3 +1,4 @@
+import sanitizeHtml from 'sanitize-html';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
@@ -47,11 +48,17 @@ function plainText(html: string): string {
 }
 
 function cleanHtml(input: string): string {
-  return input
-    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, '')
-    .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/javascript:/gi, '');
+  return sanitizeHtml(asHtml(input), {
+    allowedTags: ['p', 'br', 'strong', 'b', 'em', 'i', 'u', 's', 'h2', 'h3', 'ul', 'ol', 'li',
+      'blockquote', 'a', 'code', 'pre', 'hr', 'span', 'img'],
+    allowedAttributes: { a: ['href'], img: ['src', 'alt'] },
+    allowedSchemes: ['http', 'https'],
+    allowedSchemesByTag: { img: ['http', 'https', 'data'] },
+    allowProtocolRelative: false,
+    exclusiveFilter: (frame) => frame.tag === 'img' && !(
+      /^(?:https?:\/\/|\/(?![\\/])|data:image\/(?:png|jpeg|webp|gif|avif);base64,)/i.test(frame.attribs.src ?? '')
+    ),
+  });
 }
 
 function avatarOk(value: string | undefined): boolean {
@@ -84,7 +91,7 @@ function card(post: PostRow, extra: { liked?: boolean; locked?: boolean; chars?:
     authorId: post.authorId,
     authorName: post.author?.name?.trim() || 'Автор',
     title: post.title,
-    body: locked ? '' : asHtml(post.body),
+    body: locked ? '' : cleanHtml(post.body),
     excerpt: text.slice(0, 280),
     topic: post.topic,
     tags: post.tags,

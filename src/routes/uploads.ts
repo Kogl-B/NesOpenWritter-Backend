@@ -28,7 +28,7 @@ export const uploadRoutes: FastifyPluginAsync = async (app) => {
       const input = presignUploadSchema.parse(req.body);
       // Лимит места тарифа: заранее считаем и заявленный размер загрузки
       const tier = getTier(await getUserPlan(req.user!.id));
-      if (tier.storageLimitMb != null && typeof input.sizeBytes === 'number' && input.sizeBytes > 0) {
+      if (tier.storageLimitMb != null) {
         const used = await getStorageUsedBytes(req.user!.id);
         if (used + input.sizeBytes > tier.storageLimitMb * MB) {
           return reply.status(403).send({
@@ -42,6 +42,7 @@ export const uploadRoutes: FastifyPluginAsync = async (app) => {
         kind: input.kind,
         filename: input.filename,
         contentType: input.contentType,
+        sizeBytes: input.sizeBytes,
       });
       return { ...result, sizeBytes: input.sizeBytes ?? null };
     },

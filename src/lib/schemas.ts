@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 // ----- helpers --------------------------------------------------------------
 
-const jsonObject = z.record(z.unknown());
+const jsonObject = z.record(z.string(), z.unknown());
 const nullableString = z.string().nullish();
 const nullableId = z.string().min(1).nullish();
 
@@ -306,9 +306,9 @@ export const mapDrawingUpdateSchema = mapDrawingCreateSchema.partial();
 
 export const presignUploadSchema = z.object({
   filename: z.string().trim().min(1).max(255),
-  contentType: z.string().min(1).max(100),
+  contentType: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif', 'image/bmp', 'image/x-icon']),
   kind: z.enum(['portrait', 'item', 'map', 'other']).default('other'),
-  sizeBytes: z.number().int().positive().max(50 * 1024 * 1024).optional(),
+  sizeBytes: z.number().int().positive().max(50 * 1024 * 1024),
 });
 
 // ----- Chapter content / revisions / mentions (Этап 4) ----------------------

@@ -6,7 +6,8 @@ import sensible from '@fastify/sensible';
 import compress from '@fastify/compress';
 import { ZodError } from 'zod';
 
-import { env } from './lib/env.js';
+import { browserOrigins, env } from './lib/env.js';
+import { isBrowserMutationAllowed, isReadMethod } from './lib/requestSecurity.js';
 import { loggerConfig } from './lib/logger.js';
 import authPlugin from './plugins/auth.js';
 import { healthRoutes } from './routes/health.js';
@@ -98,12 +99,12 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(cors, {
-    origin: env.CORS_ORIGIN.split(',').map((o) => o.trim()),
+    origin: browserOrigins(),
     credentials: true,
     // ETag нужен клиентскому 304-кэшу (api.ts) — без expose JS его не видит
     exposedHeaders: ['ETag'],
   });
-  await app.register(cookie);
+  await app.register(cookie, { secret: env.BETTER_AUTH_SECRET });
   await app.register(sensible);
 
   app.setErrorHandler((err: Error & { statusCode?: number }, _req, reply) => {
@@ -124,20 +125,27 @@ export async function buildApp(): Promise<FastifyInstance> {
     return reply.status(500).send({ error: 'Internal Server Error' });
   });
 
+  const trustedOrigins = new Set(browserOrigins([new URL(env.BETTER_AUTH_URL).origin]));
+  app.addHook('onRequest', async (req, reply) => {
+    if (!isBrowserMutationAllowed(req.method, req.headers, trustedOrigins)) {
+      req.log.warn({ code: 'UNTRUSTED_REQUEST_ORIGIN', route: req.routeOptions.url }, 'Browser mutation rejected');
+      return reply.status(403).header('Cache-Control', 'private, no-store').send({ error: 'Forbidden origin' });
+    }
+  });
+  app.addHook('onSend', async (req, reply, payload) => {
+    if (req.headers.cookie || req.headers.authorization || req.user || reply.hasHeader('set-cookie')
+        || req.routeOptions.url === '/api/auth/*' || req.routeOptions.url?.startsWith('/api/integrations/gdrive/')) {
+      reply.header('Cache-Control', 'private, no-store');
+    }
+    return payload;
+  });
+
   await app.register(authPlugin);
 
-  // RBAC (BUG-79): роль «Читатель» (viewer) — только чтение. Все изменяющие
-  // запросы внутри /api/projects/:projectId/* от viewer'а отклоняются.
-  // Кэш доступа общий с assertProjectOwnership (lib/access.ts, R22) —
-  // один набор запросов project+collaborator на промах, а не два.
-
   app.addHook('preHandler', async (req, reply) => {
-    const m = req.url.match(/^\/api\/projects\/([^/]+)(\/|$)/);
-    if (!m) return;
-    if (!['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) return;
-    const userId = (req as unknown as { user?: { id?: string } }).user?.id;
-    if (!userId) return; // 401 обработает requireAuth в самом роуте
-    const role = await getProjectAccess(m[1]!, userId);
+    if (isReadMethod(req.method) || !req.user || !req.routeOptions.url?.startsWith('/api/projects/:projectId/')) return;
+    const { projectId } = req.params as { projectId: string };
+    const role = await getProjectAccess(projectId, req.user.id);
     if (role === 'viewer') {
       return reply.status(403).send({
         error: 'Роль «Читатель» даёт доступ только для просмотра. Попросите владельца проекта изменить вашу роль.',

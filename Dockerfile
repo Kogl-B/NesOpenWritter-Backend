@@ -2,6 +2,7 @@
 # syntax=docker/dockerfile:1.7
 
 FROM node:22-alpine AS base
+RUN apk add --no-cache openssl
 RUN corepack enable pnpm
 WORKDIR /app
 
@@ -9,7 +10,7 @@ WORKDIR /app
 FROM base AS deps
 COPY package.json pnpm-lock.yaml* ./
 COPY prisma ./prisma
-RUN pnpm install --frozen-lockfile=false
+RUN pnpm install --frozen-lockfile
 RUN pnpm prisma generate
 
 # ---- build ------------------------------------------------------------------
@@ -31,5 +32,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/package.json ./package.json
 
+USER node
+RUN ./node_modules/.bin/prisma --version
 EXPOSE 8080
 CMD ["sh", "-c", "npx prisma migrate deploy && node dist/server.js"]

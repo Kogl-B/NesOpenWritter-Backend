@@ -1,3 +1,4 @@
+import { env } from '../lib/env.js';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
@@ -21,10 +22,10 @@ function publicBase(): string {
   return (process.env.FRONTEND_URL ?? 'https://openwritter.app').replace(/\/$/, '');
 }
 
-function apiBase(reqHost: string): string {
+function apiBase(): string {
   const fromEnv = process.env.API_PUBLIC_URL?.replace(/\/$/, '');
   if (fromEnv) return fromEnv;
-  return reqHost.replace(/\/$/, '');
+  return new URL(env.BETTER_AUTH_URL).origin;
 }
 
 interface IpnBody {
@@ -69,12 +70,11 @@ export const cryptoRoutes: FastifyPluginAsync = async (app) => {
         purpose: 'ai_balance',
       },
     });
-    const origin = `${req.protocol}://${req.hostname}`;
     const payload = buildInvoicePayload({
       amountUsd: input.amountUsd,
       orderId: payment.id,
       description: `Пополнение баланса OpenWritter, ${input.amountUsd} USD`,
-      ipnUrl: `${apiBase(origin)}/api/payments/nowpayments/webhook`,
+      ipnUrl: `${apiBase()}/api/payments/nowpayments/webhook`,
       successUrl: `${publicBase()}/account?section=wallet&crypto=ok`,
       cancelUrl: `${publicBase()}/account?section=wallet`,
     });

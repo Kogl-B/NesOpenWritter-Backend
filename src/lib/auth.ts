@@ -2,7 +2,7 @@ import { betterAuth } from 'better-auth';
 import { prismaAdapter } from 'better-auth/adapters/prisma';
 import { twoFactor } from 'better-auth/plugins';
 
-import { env } from './env.js';
+import { browserOrigins, env } from './env.js';
 import { prisma } from './prisma.js';
 import {
   sendPasswordResetEmail,
@@ -32,12 +32,7 @@ function withCallbackUrl(authUrl: string, callbackPage: string): string {
 // trustedOrigins: every Vercel/custom domain (from CORS_ORIGIN) plus the
 // backend's own URL — proxy setups sometimes pass Origin as the backend
 // host, and same-origin checks from server-side rendering need it too.
-const trustedOrigins = Array.from(
-  new Set([
-    ...env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean),
-    env.BETTER_AUTH_URL,
-  ]),
-);
+const trustedOrigins = browserOrigins([new URL(env.BETTER_AUTH_URL).origin]);
 
 const socialProviders =
   env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
@@ -91,7 +86,7 @@ export const auth = betterAuth({
     cookiePrefix: 'nesow',
     useSecureCookies: isProd,
     defaultCookieAttributes: {
-      sameSite: isProd ? 'none' : 'lax',
+      sameSite: 'lax',
       secure: isProd,
       httpOnly: true,
     },

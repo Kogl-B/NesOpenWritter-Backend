@@ -51,10 +51,10 @@ export const STATUS_CATALOG: Record<AccountStatus, { title: string; rights: stri
 export async function resolveAccountStatus(userId: string, email: string | null | undefined): Promise<AccountStatus> {
   const row = await prisma.user.findUnique({
     where: { id: userId },
-    select: { accountStatus: true },
+    select: { accountStatus: true, email: true, emailVerified: true },
   });
   const stored = isAccountStatus(row?.accountStatus) ? row.accountStatus : 'test';
-  if (stored !== 'admin' && emailIsBootstrapAdmin(email)) {
+  if (stored !== 'admin' && row?.emailVerified && row.email === email && emailIsBootstrapAdmin(row.email)) {
     await prisma.user.update({ where: { id: userId }, data: { accountStatus: 'admin' } });
     return 'admin';
   }

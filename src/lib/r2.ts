@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { S3Client } from '@aws-sdk/client-s3';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -54,19 +55,24 @@ export async function presignUpload(opts: {
   kind: string;
   filename: string;
   contentType: string;
+  sizeBytes: number;
 }): Promise<PresignedUpload> {
   const client = getClient();
   const safeName = opts.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const key = `users/${opts.userId}/projects/${opts.projectId}/${opts.kind}/${Date.now()}-${safeName}`;
+  const key = `users/${opts.userId}/projects/${opts.projectId}/${opts.kind}/${randomUUID()}-${safeName}`;
 
   const command = new PutObjectCommand({
     Bucket: env.R2_BUCKET,
     Key: key,
     ContentType: opts.contentType,
+    ContentLength: opts.sizeBytes,
   });
 
   const expiresIn = 600; // 10 min
-  const uploadUrl = await getSignedUrl(client, command, { expiresIn });
+  const uploadUrl = await getSignedUrl(client, command, {
+    expiresIn,
+    signableHeaders: new Set(['content-type', 'content-length']),
+  });
 
   const publicUrl = env.R2_PUBLIC_BASE_URL
     ? `${env.R2_PUBLIC_BASE_URL.replace(/\/$/, '')}/${key}`
