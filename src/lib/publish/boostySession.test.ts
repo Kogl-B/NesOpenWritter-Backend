@@ -4,6 +4,8 @@ import { describe, it } from 'node:test';
 import {
   boostyProfile,
   expiresAtOf,
+  boostyLoginFailure,
+  boostyLoginSession,
   parseBoostySession,
   sessionExpired,
   sessionFromRefresh,
@@ -70,5 +72,18 @@ describe('boosty session', () => {
     assert.equal(next.accessToken, 'new-access');
     assert.equal(next.refreshToken, 'new-refresh');
     assert.equal(next.deviceId, 'device-1');
+  });
+
+  it('собирает сессию из ответа входа и не путает отказ с токеном', () => {
+    const session = boostyLoginSession({
+      access_token: 'access-token-value',
+      refresh_token: 'refresh-token-value',
+      expires_in: 3600,
+    }, 'device-9');
+    assert.equal(session.accessToken, 'access-token-value');
+    assert.equal(session.refreshToken, 'refresh-token-value');
+    assert.equal(session.deviceId, 'device-9');
+    assert.equal(boostyLoginFailure(404, { error: 'not_found', error_description: 'Not found' }), 'Boosty не нашёл такой email');
+    assert.throws(() => boostyLoginSession({}, 'device-9'), /не выдал сессию/);
   });
 });

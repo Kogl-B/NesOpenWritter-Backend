@@ -5,6 +5,40 @@ interface ExportData {
   locations: Array<{ name: string; kind: string }>;
 }
 
+export function manuscriptChapters(
+  chapters: Array<{
+    id: string;
+    title: string;
+    content: unknown;
+    wordCount: number;
+    kind: string;
+    parentId: string | null;
+    orderIndex: number;
+  }>,
+) {
+  const roots = chapters.filter((c) => !c.parentId).sort((a, b) => a.orderIndex - b.orderIndex);
+  const ordered: typeof chapters = [];
+  const used = new Set<string>();
+  for (const root of roots) {
+    ordered.push(root);
+    used.add(root.id);
+    for (const child of chapters.filter((c) => c.parentId === root.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
+      ordered.push(child);
+      used.add(child.id);
+    }
+  }
+  for (const chapter of chapters) {
+    if (!used.has(chapter.id)) ordered.push(chapter);
+  }
+  return ordered.map((c) => ({
+    id: c.id,
+    title: c.title,
+    content: c.content,
+    wordCount: c.wordCount,
+    kind: c.kind,
+  }));
+}
+
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -55,29 +89,100 @@ ${items.map((i) => `<item id="${i.id}" href="${i.href}" media-type="application/
   ]);
 }
 
-/** === DOCX === (минимальный OOXML — word/document.xml в ZIP) */
-export function generateDocx(data: ExportData): Buffer {
-  const chapters = data.chapters.filter((c) => c.kind === 'scene' || c.wordCount > 0);
-  const paras: string[] = [];
-  for (const ch of chapters) {
-    paras.push(`<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t xml:space="preserve">${esc(ch.title)}</w:t></w:r></w:p>`);
-    for (const line of tipapToText(ch.content).split('\n')) {
-      paras.push(`<w:p><w:r><w:t xml:space="preserve">${esc(line)}</w:t></w:r></w:p>`);
-    }
-  }
-  const document = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-<w:body>
-<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>${esc(data.projectName)}</w:t></w:r></w:p>
-${paras.join('\n')}
-</w:body></w:document>`;
-  const contentTypes = `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
-  const rels = `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+interface WordNode {
+  type?: string;
+  text?: string;
+  attrs?: { level?: number; alt?: string; textAlign?: string };
+  marks?: { type?: string }[];
+  content?: WordNode[];
+}
 
+function wordText(value: string): string {
+  return esc(value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ''));
+}
+
+const WORD_MARKS = new Map([
+  ['bold', '<w:b/>'], ['italic', '<w:i/>'], ['underline', '<w:u w:val="single"/>'], ['strike', '<w:strike/>'],
+  ['subscript', '<w:vertAlign w:val="subscript"/>'], ['superscript', '<w:vertAlign w:val="superscript"/>'],
+]);
+
+function wordRun(text: string, marks: WordNode['marks'] = []): string {
+  const props = marks.map((mark) => WORD_MARKS.get(mark?.type ?? '') ?? '').join('');
+  const contents = text.split(/\r?\n/).map((line) => '<w:t xml:space="preserve">' + wordText(line) + '</w:t>').join('<w:br/>');
+  return '<w:r>' + (props ? '<w:rPr>' + props + '</w:rPr>' : '') + contents + '</w:r>';
+}
+
+function wordInline(node: WordNode | null | undefined): string {
+  if (!node) return '';
+  if (node.type === 'hardBreak') return '<w:r><w:br/></w:r>';
+  if (typeof node.text === 'string') return wordRun(node.text, Array.isArray(node.marks) ? node.marks : []);
+  if (node.type === 'image' && typeof node.attrs?.alt === 'string') return wordRun(node.attrs.alt);
+  return Array.isArray(node.content) ? node.content.map(wordInline).join('') : '';
+}
+
+function wordParagraph(runs: string, style?: string, align?: string): string {
+  const props = (style ? '<w:pStyle w:val="' + style + '"/>' : '')
+    + (align && ['left', 'right', 'center', 'justify'].includes(align)
+      ? '<w:jc w:val="' + (align === 'justify' ? 'both' : align) + '"/>' : '');
+  return '<w:p>' + (props ? '<w:pPr>' + props + '</w:pPr>' : '') + runs + '</w:p>';
+}
+
+function wordBlocks(node: WordNode | null | undefined): string {
+  if (!node) return '';
+  const children = Array.isArray(node.content) ? node.content : [];
+  if (node.type === 'heading') {
+    const level = Math.min(6, Math.max(1, Number(node.attrs?.level) || 1));
+    return wordParagraph(wordInline(node), 'Heading' + Math.floor(level), node.attrs?.textAlign);
+  }
+  if (node.type === 'paragraph') return wordParagraph(wordInline(node), undefined, node.attrs?.textAlign);
+  if (node.type === 'doc' || node.type === 'blockquote') return children.map(wordBlocks).join('');
+  if (node.type === 'table') {
+    const rows = children.filter((row) => row?.type === 'tableRow' && Array.isArray(row.content) && row.content.length);
+    if (!rows.length) return '';
+    const columns = Math.max(...rows.map((row) => row.content!.length));
+    const grid = '<w:tblGrid>' + '<w:gridCol/>'.repeat(columns) + '</w:tblGrid>';
+    const body = rows.map((row) => '<w:tr>' + row.content!.map((cell) => {
+      const content = wordBlocks(cell);
+      return '<w:tc>' + (content.endsWith('</w:p>') ? content : content + '<w:p/>') + '</w:tc>';
+    }).join('') + '</w:tr>').join('');
+    return '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>' + grid + body + '</w:tbl>';
+  }
+  if (children.length) return children.map(wordBlocks).join('');
+  const text = wordInline(node);
+  return text ? wordParagraph(text) : '';
+}
+
+/** === DOCX === */
+export function generateDocx(data: ExportData): Buffer {
+  const ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const pack = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  const office = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const book = data.chapters.map((chapter) => {
+    const body = typeof chapter.content === 'string'
+      ? chapter.content.split(/\r?\n/).map((paragraph) => wordParagraph(wordRun(paragraph))).join('')
+      : wordBlocks(chapter.content as WordNode | null);
+    return wordParagraph(wordRun(chapter.title), chapter.kind === 'scene' ? 'Heading2' : 'Heading1') + body;
+  }).join('');
+  const document = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="' + ns + '"><w:body>'
+    + wordParagraph(wordRun(data.projectName), 'Title') + book + '</w:body></w:document>';
+  const styles = '<w:styles xmlns:w="' + ns + '"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
+    + '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="52"/></w:rPr></w:style>'
+    + [36, 30, 26, 24, 22, 20].map((size, index) =>
+      '<w:style w:type="paragraph" w:styleId="Heading' + (index + 1) + '"><w:name w:val="heading ' + (index + 1)
+      + '"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="220" w:after="100"/><w:outlineLvl w:val="'
+      + index + '"/></w:pPr><w:rPr><w:b/><w:sz w:val="' + size + '"/></w:rPr></w:style>').join('')
+    + '</w:styles>';
+  const contentTypes = '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    + '<Default Extension="xml" ContentType="application/xml"/>'
+    + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+    + '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>';
   return createZip([
     { name: '[Content_Types].xml', data: Buffer.from(contentTypes) },
-    { name: '_rels/.rels', data: Buffer.from(rels) },
+    { name: '_rels/.rels', data: Buffer.from('<Relationships xmlns="' + pack + '"><Relationship Id="rId1" Type="' + office + '/officeDocument" Target="word/document.xml"/></Relationships>') },
     { name: 'word/document.xml', data: Buffer.from(document) },
+    { name: 'word/styles.xml', data: Buffer.from(styles) },
+    { name: 'word/_rels/document.xml.rels', data: Buffer.from('<Relationships xmlns="' + pack + '"><Relationship Id="rId1" Type="' + office + '/styles" Target="styles.xml"/></Relationships>') },
   ]);
 }
 
@@ -140,11 +245,11 @@ export function generatePdf(data: ExportData): Buffer {
 }
 
 /** Минимальный ZIP writer (store + deflate через zlib) */
-import { deflateSync } from 'node:zlib';
+import { deflateRawSync } from 'node:zlib';
 
 interface ZipEntry { name: string; data: Buffer; store?: boolean }
 
-function createZip(entries: ZipEntry[]): Buffer {
+export function createZip(entries: ZipEntry[]): Buffer {
   const chunks: Buffer[] = [];
   const centralDir: Buffer[] = [];
   let offset = 0;
@@ -159,7 +264,7 @@ function createZip(entries: ZipEntry[]): Buffer {
       compressed = entry.data;
       method = 0;
     } else {
-      compressed = deflateSync(entry.data);
+      compressed = deflateRawSync(entry.data);
       method = 8;
     }
 

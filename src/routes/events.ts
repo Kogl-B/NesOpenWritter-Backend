@@ -98,9 +98,24 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       }
       const event = await prisma.timelineEvent.findFirst({
         where: { id: req.params.eventId, projectId: req.params.projectId },
+        include: {
+          manuscriptSources: {
+            where: { disposition: 'accepted' },
+            select: {
+              jobId: true, proposalIndex: true, quote: true,
+              job: { select: { timelineChapter: { select: { id: true, title: true } } } },
+            },
+            orderBy: { createdAt: 'asc' },
+          },
+        },
       });
       if (!event) return reply.status(404).send({ error: 'Event not found' });
-      return { event };
+      const { manuscriptSources, ...data } = event;
+      const sources = [...new Map(manuscriptSources.map(({ job, ...source }) => [
+        JSON.stringify([job.timelineChapter?.id, source.quote]),
+        { ...source, chapter: job.timelineChapter },
+      ])).values()];
+      return { event: { ...data, manuscriptSources: sources } };
     },
   );
 

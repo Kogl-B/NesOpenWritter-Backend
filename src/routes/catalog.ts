@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../lib/prisma.js';
@@ -8,8 +8,19 @@ import { scoreChapters } from '../lib/aiMarks.js';
 import { chapterIsHidden } from '../lib/publish/visibility.js';
 import { bookBlocked, chapterBlocked, postBlocked } from '../lib/geo/policy.js';
 import { countryBlocks, denyCatalogGeo, denyGeo } from '../lib/geo/request.js';
-import { commentNotices, readerReportNotice } from '../lib/notify/drafts.js';
-import { writeNotices } from '../lib/notify/deliver.js';
+import { bookDigestKey, bookSubscriptionNotice, commentNotices, digestDay, readerReportNotice } from '../lib/notify/drafts.js';
+import { writeDigest, writeNotices } from '../lib/notify/deliver.js';
+import { coverHref } from '../lib/ai/place.js';
+import { filterCatalogBooks } from '../lib/catalogSearch.js';
+import { viewerBlocks } from '../lib/viewerBlocks.js';
+import { readerAccessOf } from '../lib/readerAccess.js';
+import { cachedReaderPages, pageHeight, PAGE_WIDTH, readerPages, renderReaderPage } from '../lib/protectedReader.js';
+import { generateEpub } from '../lib/exporters.js';
+import { chapterBlocks } from '../lib/publish/text.js';
+import { projectFootnotes, footnoteLines } from '../lib/footnoteText.js';
+import { directoryCard, directoryId, findDirectoryReference, publicDirectoryContent } from '../lib/worldDirectory.js';
+import { captureError } from '../lib/sentry.js';
+import { blockedAutomation, ROBOTS_TAG } from '../lib/botPolicy.js';
 
 interface RawBook {
   id: string;
@@ -54,6 +65,8 @@ export interface BookCard {
   subscribed: boolean;
   cover: string;
   structure: 'chapters' | 'chapters-scenes';
+  protectCopy: boolean;
+  allowDownload: boolean;
 }
 
 function metaOf(settings: unknown) {
@@ -68,17 +81,9 @@ function metaOf(settings: unknown) {
     status: status as BookCard['status'],
     cycle: typeof catalog.cycle === 'string' ? catalog.cycle : '',
     authorNote: typeof catalog.authorNote === 'string' ? catalog.authorNote : '',
-    cover: typeof root.cover === 'string' && root.cover.startsWith('data:image/') && root.cover.length <= 220_000 ? root.cover : '',
+    cover: coverHref(root.cover),
     structure: root.structure === 'chapters' ? 'chapters' as const : 'chapters-scenes' as const,
   };
-}
-
-async function blockedAuthors(userId: string | null): Promise<Set<string>> {
-  if (!userId) return new Set();
-  const me = await prisma.user.findUnique({ where: { id: userId }, select: { settings: true } });
-  const raw = me?.settings && typeof me.settings === 'object' ? (me.settings as { blockedAuthorIds?: unknown }).blockedAuthorIds : [];
-  if (!Array.isArray(raw)) return new Set();
-  return new Set(raw.filter((id): id is string => typeof id === 'string' && id !== userId));
 }
 
 async function loadBooks(userId: string | null): Promise<BookCard[]> {
@@ -124,8 +129,8 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
   }
   const mineOf = new Map(mine.map((m) => [m.projectId, m]));
   const subscribed = new Set(subs.map((row) => row.projectId));
-  const blocked = await blockedAuthors(userId);
-  return rows.filter((row) => !blocked.has(row.ownerId)).map((row) => {
+  const blocked = await viewerBlocks(userId);
+  return rows.filter((row) => !blocked.people.has(row.ownerId) && !blocked.books.has(row.id)).map((row) => {
     const meta = metaOf(row.settings);
     const own = mineOf.get(row.id);
     const textAt = row.textUpdatedAt ?? row.updatedAt;
@@ -158,6 +163,7 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
       subscribed: subscribed.has(row.id),
       cover: meta.cover,
       structure: meta.structure,
+      ...readerAccessOf(row.settings),
     };
   });
 }
@@ -200,7 +206,86 @@ function publicAudio(metadata: unknown): { url: string; title: string } | null {
   return { url: parsed.toString(), title };
 }
 
+async function publicReading(req: FastifyRequest, reply: FastifyReply, id: string) {
+  reply.header('Cache-Control', 'private, no-store');
+  const project = await prisma.project.findUnique({ where: { id }, select: { name: true, settings: true, ownerId: true } });
+  if (!project || !metaPublished(project.settings)) {
+    reply.status(404).send({ error: 'Книга не опубликована' });
+    return null;
+  }
+  const [blocks, geo] = await Promise.all([viewerBlocks(req.user?.id ?? null), countryBlocks(req)]);
+  if (blocks.books.has(id) || blocks.people.has(project.ownerId)) {
+    reply.status(404).send({ error: 'Книга не опубликована' });
+    return null;
+  }
+  if (bookBlocked(geo.index, geo.country, id)) {
+    await denyGeo(reply);
+    return null;
+  }
+  return { project, geo, access: readerAccessOf(project.settings) };
+}
+
+function readerFailure(req: FastifyRequest, reply: FastifyReply, err: unknown, projectId: string, chapterId: string) {
+  const context = { code: 'PROTECTED_READER_FAILED', projectId, chapterId, requestId: req.id };
+  req.log.error({ err, ...context }, 'Не удалось отобразить защищённую главу');
+  captureError(err, context);
+  return reply.status(503).send({ error: 'Не удалось открыть защищённую главу.' });
+}
+
+function readingChapters<T extends { id: string; kind: string; parentId: string | null }>(rows: T[]) {
+  const scenesByChapter = new Map(rows.filter((row) => row.kind === 'chapter').map((row) => [row.id, [] as T[]]));
+  const standalone = rows.filter((row) => {
+    const scenes = row.kind === 'scene' && row.parentId ? scenesByChapter.get(row.parentId) : undefined;
+    if (!scenes) return true;
+    scenes.push(row);
+    return false;
+  });
+  return standalone.map((chapter) => ({ chapter, scenes: scenesByChapter.get(chapter.id) ?? [] }));
+}
+
+type PublicChapterOutline = {
+  id: string;
+  title: string;
+  kind: string;
+  parentId: string | null;
+  orderIndex: number;
+  wordCount: number;
+  metadata: unknown;
+  hasText: boolean;
+};
+
+const visibleCharacter = '[^[:space:]\u00a0\u200b]';
+const nonBlank = JSON.stringify(visibleCharacter);
+const readableNodes = '$.content.** ? ('
+  + '(@.type == "text" && @.text like_regex ' + nonBlank + ')'
+  + ' || (@.type == "image" && @.attrs.src like_regex ' + nonBlank + ')'
+  + ' || (@.type == "directoryReference" && @.attrs.id like_regex ' + nonBlank + ')'
+  + ')';
+
+function publicChapterOutline(projectId: string) {
+  return prisma.$queryRaw<PublicChapterOutline[]>`
+    SELECT id, title, kind, "parentId", "orderIndex", "wordCount", metadata,
+           CASE jsonb_typeof(content)
+             WHEN 'string' THEN (content #>> '{}') ~ ${visibleCharacter}
+             WHEN 'object' THEN jsonb_path_exists(content, ${readableNodes}::jsonpath)
+             ELSE false
+           END AS "hasText"
+    FROM chapters
+    WHERE "projectId" = ${projectId}
+    ORDER BY "orderIndex", "createdAt", id
+  `;
+}
+
+const chapterContentFields = {
+  id: true, title: true, content: true, wordCount: true, kind: true, parentId: true, metadata: true, updatedAt: true,
+} as const;
+const readingOrder = [{ orderIndex: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }] as const;
+
 export const catalogRoutes: FastifyPluginAsync = async (app) => {
+  app.addHook('onRequest', async (req, reply) => {
+    reply.header('X-Robots-Tag', ROBOTS_TAG);
+    if (blockedAutomation(req.headers['user-agent'])) return reply.status(403).send({ error: 'Автоматизированный доступ запрещён.' });
+  });
   app.addHook('preHandler', async (req, reply) => {
     if (await denyCatalogGeo(req, reply)) return reply;
   });
@@ -234,9 +319,14 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     const mine = mineRaw.filter(keepBook);
     const books = authoredRaw.filter((book) => book.authorId === author.id && keepBook(book));
     const ids = new Set(books.map((book) => book.id));
+    const blocks = await viewerBlocks(viewerId);
     const [posts, comments, followers, following] = await Promise.all([
       prisma.blogPost.findMany({
-        where: { authorId: author.id, published: true },
+        where: {
+          authorId: author.id,
+          published: true,
+          ...(viewerId === author.id ? {} : { audience: { not: 'self' } }),
+        },
         orderBy: { createdAt: 'desc' },
         take: 40,
         select: {
@@ -276,7 +366,11 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
         following: Boolean(following),
       },
       books,
-      posts: posts.filter((post) => !postBlocked(geo.index, geo.country, post.id)).map((post) => ({
+      posts: posts.filter((post) => (
+        !postBlocked(geo.index, geo.country, post.id)
+        && !blocks.blogs.has(post.id)
+        && !blocks.people.has(author.id)
+      )).map((post) => ({
         id: post.id,
         title: post.title,
         topic: post.topic,
@@ -343,7 +437,12 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     const take = (list: BookCard[]) => list.slice(0, 12);
     const fresh = books.filter((b) => Date.now() - byDate(b.createdAt) < 90 * 86400000);
     const mine = books.filter((b) => b.favorite);
+    // Учитываем долю позитивных действий, сглаживая результат при малом числе просмотров.
+    const score = (book: BookCard) => (book.likes + book.favorites) / (book.views + 20);
+    const recommended = books.filter((book) => book.likes + book.favorites > 0)
+      .sort((a, b) => score(b) - score(a) || b.likes - a.likes || b.views - a.views || a.id.localeCompare(b.id));
     return {
+      recommended: take(recommended),
       shelves: {
         popular: take([...books].sort((a, b) => b.views - a.views || b.words - a.words)),
         hot: take((fresh.length ? fresh : books).slice().sort((a, b) => b.views - a.views || byDate(b.createdAt) - byDate(a.createdAt))),
@@ -358,35 +457,8 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/catalog/search', async (req) => {
-    const q = (req.query.q ?? '').trim().toLowerCase();
-    const genre = req.query.genre ?? '';
-    const status = req.query.status ?? '';
-    const author = (req.query.author ?? '').trim().toLowerCase();
-    const tag = (req.query.tag ?? '').trim().toLowerCase();
-    const sort = req.query.sort ?? 'popular';
-    const minWords = Number(req.query.minWords ?? 0) || 0;
-    const maxWords = Number(req.query.maxWords ?? 0) || 0;
-    const allowed = genre ? new Set(expandGenre(genre)) : null;
-    let books = await hideBooks(req, await loadBooks(req.user?.id ?? null));
-    books = books.filter((book) => {
-      if (allowed && !book.genres.some((id) => allowed.has(id))) return false;
-      if (status && book.status !== status) return false;
-      if (author && !book.authorName.toLowerCase().includes(author)) return false;
-      if (tag && !book.tags.some((t) => t.toLowerCase().includes(tag)) && !book.genreNames.some((t) => t.toLowerCase().includes(tag))) return false;
-      if (minWords && book.words < minWords) return false;
-      if (maxWords && book.words > maxWords) return false;
-      if (!q) return true;
-      const hay = [book.title, book.authorName, book.description, book.cycle, ...book.tags, ...book.genreNames].join(' ').toLowerCase();
-      return hay.includes(q);
-    });
-    books.sort((a, b) => {
-      if (sort === 'new') return byDate(b.createdAt) - byDate(a.createdAt);
-      if (sort === 'updated') return byDate(b.textUpdatedAt) - byDate(a.textUpdatedAt);
-      if (sort === 'likes') return b.likes - a.likes || b.views - a.views;
-      if (sort === 'words') return b.words - a.words;
-      return b.views - a.views || b.likes - a.likes || b.words - a.words;
-    });
-    return { books };
+    const books = await hideBooks(req, await loadBooks(req.user?.id ?? null));
+    return { books: filterCatalogBooks(books, req.query, expandGenre) };
   });
 
   app.get('/api/catalog/tops', async (req) => {
@@ -415,11 +487,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     if (bookBlocked(geo.index, geo.country, book.id)) return denyGeo(reply);
     const shelf = books.filter((item) => !bookBlocked(geo.index, geo.country, item.id));
     const [chapters, comments, marks] = await Promise.all([
-      prisma.chapter.findMany({
-        where: { projectId: book.id },
-        select: { id: true, title: true, kind: true, parentId: true, orderIndex: true, wordCount: true, metadata: true },
-        orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],
-      }),
+      publicChapterOutline(book.id),
       prisma.bookComment.findMany({
         where: { projectId: book.id },
         orderBy: { createdAt: 'desc' },
@@ -433,21 +501,33 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     const openChapter = (row: { id: string; metadata: unknown }) => (
       !chapterIsHidden(row.metadata) && !chapterBlocked(geo.index, geo.country, book.id, row.id)
     );
-    const closed = chapters.filter((row) => !chapterIsHidden(row.metadata) && !openChapter(row));
-    const visibleChapters = chapters
-      .filter(openChapter)
-      .map(({ metadata: _metadata, ...row }) => row);
+    const visible = chapters.filter(openChapter);
+    const visibleChapters = visible.map(({ metadata: _metadata, hasText, ...row }) => ({
+      ...row,
+      wordCount: hasText ? row.wordCount : 0,
+    }));
+    const reading = readingChapters(visible).flatMap(({ chapter, scenes }) => {
+      const parts = [chapter, ...scenes];
+      if (!parts.some((part) => part.hasText || publicAudio(part.metadata))) return [];
+      return [{
+        id: chapter.id,
+        title: chapter.title,
+        wordCount: parts.reduce((words, part) => words + (part.hasText ? part.wordCount : 0), 0),
+        sceneIds: scenes.map((scene) => scene.id),
+      }];
+    });
     const visibleComments = comments.filter((row) => !row.chapterId || !chapterBlocked(geo.index, geo.country, book.id, row.chapterId));
     const parentNames = await commentParentNames(visibleComments.map((row) => row.parentId));
     const genreSet = new Set(book.genres);
     const publicBook = {
       ...book,
-      words: Math.max(0, book.words - closed.reduce((sum, row) => sum + row.wordCount, 0)),
-      chapters: Math.max(0, book.chapters - closed.length),
+      words: reading.reduce((sum, chapter) => sum + chapter.wordCount, 0),
+      chapters: reading.length,
     };
     return {
       book: publicBook,
       chapters: visibleChapters,
+      readingChapters: reading,
       comments: visibleComments.map((row) => publicBookComment(row, row.parentId ? parentNames.get(row.parentId) ?? '' : '')),
       authorBooks: shelf.filter((item) => item.authorId === book.authorId).length,
       similar: shelf.filter((other) => other.id !== book.id && other.genres.some((id) => genreSet.has(id))).slice(0, 6),
@@ -455,21 +535,60 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
-  app.get<{ Params: { id: string; chapterId: string } }>('/api/catalog/books/:id/chapters/:chapterId', async (req, reply) => {
-    const project = await prisma.project.findUnique({ where: { id: req.params.id }, select: { settings: true } });
-    if (!metaPublished(project?.settings)) return reply.status(404).send({ error: 'Книга не опубликована' });
-    const chapter = await prisma.chapter.findFirst({
-      where: { id: req.params.chapterId, projectId: req.params.id },
-      select: { id: true, title: true, content: true, wordCount: true, kind: true, metadata: true },
+  app.get<{ Params: { id: string; chapterId: string }; Querystring: { whole?: string } }>('/api/catalog/books/:id/chapters/:chapterId', async (req, reply) => {
+    const { id, chapterId } = req.params;
+    const scope = await publicReading(req, reply, id);
+    if (!scope) return reply;
+    const requested = await prisma.chapter.findFirst({
+      where: { id: chapterId, projectId: id },
+      select: chapterContentFields,
     });
-    if (!chapter || chapterIsHidden(chapter.metadata)) return reply.status(404).send({ error: 'Глава не найдена' });
-    const geo = await countryBlocks(req);
-    if (chapterBlocked(geo.index, geo.country, req.params.id, req.params.chapterId)) return denyGeo(reply);
-    const audio = publicAudio(chapter.metadata);
+    if (!requested || chapterIsHidden(requested.metadata)) return reply.status(404).send({ error: 'Глава не найдена' });
+    if (chapterBlocked(scope.geo.index, scope.geo.country, id, chapterId)) return denyGeo(reply);
+    const whole = req.query.whole === '1';
+    const visible = (row: { id: string; metadata: unknown }) => (
+      !chapterIsHidden(row.metadata) && !chapterBlocked(scope.geo.index, scope.geo.country, id, row.id)
+    );
+    let chapter = requested;
+    if (whole && requested.kind === 'scene' && requested.parentId) {
+      const parent = await prisma.chapter.findFirst({
+        where: { id: requested.parentId, projectId: id, kind: 'chapter' },
+        select: chapterContentFields,
+      });
+      if (parent && visible(parent)) chapter = parent;
+    }
+    const scenes = whole && chapter.kind === 'chapter'
+      ? (await prisma.chapter.findMany({
+        where: { projectId: id, parentId: chapter.id, kind: 'scene' },
+        select: chapterContentFields,
+        orderBy: [...readingOrder],
+      })).filter(visible)
+      : [];
+    const parts = [chapter, ...scenes];
+    const audio = publicAudio(requested.metadata)
+      ?? parts.map((part) => publicAudio(part.metadata)).find(Boolean)
+      ?? null;
+    let pages: Array<{ src: string; raster: boolean; width?: number; height?: number }> | undefined;
+    if (scope.access.protectCopy) {
+      try {
+        pages = parts.flatMap((part) =>
+          readerPages(`${part.id}:${part.updatedAt.toISOString()}`, part.content).map((page, index) => ({
+            src: `/api/catalog/books/${id}/chapters/${part.id}/pages/${index + 1}`,
+            raster: page.kind === 'text',
+            ...(page.kind === 'text' ? {
+              width: PAGE_WIDTH, height: pageHeight(page.lines.length),
+              ...(page.references.length && { references: page.references.map((reference) => ({ ...reference, chapterId: part.id })) }),
+            } : {}),
+          })),
+        );
+      } catch (err) {
+        return readerFailure(req, reply, err, id, chapterId);
+      }
+    }
     if (req.user) {
       await prisma.bookReaction.upsert({
-        where: { userId_projectId: { userId: req.user.id, projectId: req.params.id } },
-        create: { userId: req.user.id, projectId: req.params.id, lastReadAt: new Date() },
+        where: { userId_projectId: { userId: req.user.id, projectId: id } },
+        create: { userId: req.user.id, projectId: id, lastReadAt: new Date() },
         update: { lastReadAt: new Date() },
       });
     }
@@ -477,13 +596,100 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
       chapter: {
         id: chapter.id,
         title: chapter.title,
-        content: chapter.content,
-        wordCount: chapter.wordCount,
+        ...(pages ? { protectedPages: pages } : whole ? {
+          contents: parts.map((part) => publicDirectoryContent(scope.project.settings, part.content)), contentChapterIds: parts.map((part) => part.id),
+        } : { content: publicDirectoryContent(scope.project.settings, chapter.content) }),
+        wordCount: parts.reduce((words, part) => words + part.wordCount, 0),
         kind: chapter.kind,
         audioUrl: audio?.url ?? null,
         audioTitle: audio?.title ?? '',
       },
     };
+  });
+
+  app.get<{ Params: { id: string; chapterId: string; referenceId: string } }>('/api/catalog/books/:id/chapters/:chapterId/directory/:referenceId', async (req, reply) => {
+    const { id, chapterId, referenceId } = req.params;
+    const scope = await publicReading(req, reply, id);
+    if (!scope) return reply;
+    const unavailable = () => reply.status(404).send({ error: 'Справочная запись недоступна.' });
+    if (!directoryId.safeParse(referenceId).success) return unavailable();
+    const chapter = await prisma.chapter.findFirst({
+      where: { id: chapterId, projectId: id }, select: { metadata: true, content: true },
+    });
+    if (!chapter || chapterIsHidden(chapter.metadata)) return unavailable();
+    if (chapterBlocked(scope.geo.index, scope.geo.country, id, chapterId)) return denyGeo(reply);
+    const reference = findDirectoryReference(chapter.content, referenceId);
+    const card = reference && await directoryCard(id, scope.project.settings, reference, {
+      chapterId, isBlocked: (unitId) => chapterBlocked(scope.geo.index, scope.geo.country, id, unitId),
+    });
+    return card ? { card } : unavailable();
+  });
+
+  app.get<{ Params: { id: string; chapterId: string; page: string } }>('/api/catalog/books/:id/chapters/:chapterId/pages/:page', async (req, reply) => {
+    const { id, chapterId, page } = req.params;
+    const index = Number(page) - 1;
+    if (!/^[1-9]\d*$/.test(page) || !Number.isSafeInteger(index)) return reply.status(404).send({ error: 'Страница не найдена' });
+    const scope = await publicReading(req, reply, id);
+    if (!scope) return reply;
+    if (!scope.access.protectCopy) return reply.status(404).send({ error: 'Страница не найдена' });
+    const chapter = await prisma.chapter.findFirst({
+      where: { id: chapterId, projectId: id },
+      select: { metadata: true, updatedAt: true },
+    });
+    if (!chapter || chapterIsHidden(chapter.metadata)) return reply.status(404).send({ error: 'Глава не найдена' });
+    if (chapterBlocked(scope.geo.index, scope.geo.country, id, chapterId)) return denyGeo(reply);
+    try {
+      const key = `${chapterId}:${chapter.updatedAt.toISOString()}`;
+      let pages = cachedReaderPages(key);
+      if (!pages) {
+        const content = await prisma.chapter.findFirst({
+          where: { id: chapterId, projectId: id, updatedAt: chapter.updatedAt },
+          select: { content: true },
+        });
+        if (!content) return reply.status(409).send({ error: 'Глава обновилась. Откройте её заново.' });
+        pages = readerPages(key, content.content);
+      }
+      const visible = pages[index];
+      if (!visible) return reply.status(404).send({ error: 'Страница не найдена' });
+      if (visible.kind === 'text') return reply.type('image/png').send(await renderReaderPage(visible.lines, visible.references));
+      const inline = /^data:(image\/[a-z]+);base64,(.+)$/i.exec(visible.src);
+      if (inline) return reply.type(inline[1]!).send(Buffer.from(inline[2]!, 'base64'));
+      return reply.redirect(visible.src);
+    } catch (err) {
+      return readerFailure(req, reply, err, id, chapterId);
+    }
+  });
+
+  app.get<{ Params: { id: string } }>('/api/catalog/books/:id/download', async (req, reply) => {
+    const { id } = req.params;
+    const scope = await publicReading(req, reply, id);
+    if (!scope) return reply;
+    if (!scope.access.allowDownload) return reply.status(403).send({ error: 'Автор запретил скачивание книги.' });
+    const rows = await prisma.chapter.findMany({
+      where: { projectId: id },
+      orderBy: [...readingOrder],
+      select: { id: true, title: true, content: true, kind: true, parentId: true, wordCount: true, metadata: true },
+    });
+    const visible = rows.filter((row) => !chapterIsHidden(row.metadata) && !chapterBlocked(scope.geo.index, scope.geo.country, id, row.id));
+    const chapters = readingChapters(visible).flatMap(({ chapter, scenes }) => {
+      const parts = [chapter, ...scenes];
+      const notes: string[] = [];
+      const lines = parts.flatMap((row) => typeof row.content === 'string'
+        ? [row.content.trim()] : chapterBlocks(projectFootnotes(publicDirectoryContent(scope.project.settings, row.content), notes)));
+      const content = [...lines, ...footnoteLines(notes)].filter(Boolean).join('\n');
+      const wordCount = Math.max(1, parts.reduce((sum, row) => sum + row.wordCount, 0));
+      return content ? [{ id: chapter.id, title: chapter.title, kind: chapter.kind, content, wordCount }] : [];
+    });
+    if (!chapters.length) return reply.status(404).send({ error: 'В книге нет доступных глав.' });
+    const file = generateEpub({
+      projectName: scope.project.name,
+      chapters,
+      characters: [],
+      locations: [],
+    });
+    const filename = encodeURIComponent(scope.project.name + '.epub').replace(/[!'()*]/g, (value) => `%${value.charCodeAt(0).toString(16).toUpperCase()}`);
+    return reply.header('Content-Disposition', `attachment; filename="book.epub"; filename*=UTF-8''${filename}`)
+      .type('application/epub+zip').send(file);
   });
 
   app.post<{ Params: { id: string } }>('/api/catalog/books/:id/view', async (req, reply) => {
@@ -495,6 +701,10 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
 
   app.post<{ Params: { id: string } }>('/api/catalog/books/:id/like', async (req) => {
     app.requireAuth(req);
+    const prev = await prisma.bookReaction.findUnique({
+      where: { userId_projectId: { userId: req.user!.id, projectId: req.params.id } },
+      select: { liked: true },
+    });
     const on = await toggleFlag(req.params.id, req.user!.id, 'liked', flagSchema.parse(req.body ?? {}).on);
     if (on) {
       await prisma.bookReaction.update({
@@ -502,11 +712,16 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
         data: { disliked: false },
       });
     }
+    if (on !== (prev?.liked ?? false)) await bookDigest(req.params.id, req.user!.id, 'likes', on);
     return { liked: on };
   });
 
   app.post<{ Params: { id: string } }>('/api/catalog/books/:id/dislike', async (req) => {
     app.requireAuth(req);
+    const prev = await prisma.bookReaction.findUnique({
+      where: { userId_projectId: { userId: req.user!.id, projectId: req.params.id } },
+      select: { liked: true },
+    });
     const on = await toggleFlag(req.params.id, req.user!.id, 'disliked', flagSchema.parse(req.body ?? {}).on);
     if (on) {
       await prisma.bookReaction.update({
@@ -514,6 +729,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
         data: { liked: false },
       });
     }
+    if (on && prev?.liked) await bookDigest(req.params.id, req.user!.id, 'likes', false);
     return { disliked: on };
   });
 
@@ -527,6 +743,19 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
       return { subscribed: false };
     }
     await prisma.bookSubscription.create({ data: key });
+    const [project, me] = await Promise.all([
+      prisma.project.findUnique({ where: { id: req.params.id }, select: { ownerId: true, name: true } }),
+      prisma.user.findUnique({ where: { id: req.user!.id }, select: { name: true } }),
+    ]);
+    if (project) {
+      await writeNotices(bookSubscriptionNotice({
+        ownerId: project.ownerId,
+        actorId: req.user!.id,
+        actorName: me?.name?.trim() || 'Читатель',
+        projectId: req.params.id,
+        bookTitle: project.name,
+      }));
+    }
     return { subscribed: true };
   });
 
@@ -534,12 +763,18 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     app.requireAuth(req);
     const { shelf } = shelfSchema.parse(req.body ?? {});
     await ensurePublished(req.params.id);
+    const prev = await prisma.bookReaction.findUnique({
+      where: { userId_projectId: { userId: req.user!.id, projectId: req.params.id } },
+      select: { shelf: true },
+    });
     const favorite = shelf === 'reading' || shelf === 'later' || shelf === 'done';
     await prisma.bookReaction.upsert({
       where: { userId_projectId: { userId: req.user!.id, projectId: req.params.id } },
       create: { userId: req.user!.id, projectId: req.params.id, shelf, favorite },
       update: { shelf, favorite },
     });
+    const reading = shelf === 'reading';
+    if ((prev?.shelf === 'reading') !== reading) await bookDigest(req.params.id, req.user!.id, 'reading', reading);
     return { shelf, favorite };
   });
 
@@ -687,6 +922,23 @@ function metaPublished(settings: unknown): boolean {
   if (!settings || typeof settings !== 'object') return false;
   const catalog = (settings as { catalog?: { published?: unknown } }).catalog;
   return catalog?.published === true;
+}
+
+async function bookDigest(projectId: string, actorId: string, bucket: 'likes' | 'reading', on: boolean) {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { ownerId: true, name: true },
+  });
+  if (!project) return;
+  await writeDigest({
+    ownerId: project.ownerId,
+    actorId,
+    bucket,
+    on,
+    subject: project.name,
+    href: `/books/${projectId}`,
+    eventKey: bookDigestKey(projectId, digestDay(new Date())),
+  });
 }
 
 async function ensurePublished(projectId: string) {

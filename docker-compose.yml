@@ -50,13 +50,17 @@ services:
       - nesopenwritter_forum_db:/var/lib/mysql
 
   flarum:
-    image: mondedie/flarum:stable
+    image: mondedie/flarum:stable@sha256:792eeb203f3edd8df665bc36d40a74891b8559eb4953834bb0341a3f2ec1a171
     container_name: nesopenwritter_forum
     restart: unless-stopped
     depends_on:
       - forum-db
     ports:
       - "8089:8888"
+    volumes:
+      - ./forum:/openwritter-forum:ro
+    post_start:
+      - command: /bin/sh /openwritter-forum/setup.sh
     environment:
       DEBUG: "false"
       FORUM_URL: http://localhost:8089

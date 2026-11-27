@@ -30,6 +30,7 @@ export function sponsrManageForm(input: {
   html: string;
   notify: boolean;
   date: string;
+  status?: 'active' | 'draft';
 }): URLSearchParams {
   const body = new URLSearchParams();
   if (input.postId) body.set('post_id', String(input.postId));
@@ -47,7 +48,7 @@ export function sponsrManageForm(input: {
   body.set('set_def_level', '0');
   body.set('post_access_type', 'def');
   body.set('post_access_value', '0');
-  body.set('post_status', 'active');
+  body.set('post_status', input.status === 'draft' ? 'draft' : 'active');
   return body;
 }
 
@@ -156,6 +157,7 @@ export async function saveSponsrManagePost(session: SponsrSession, input: {
   title: string;
   html: string;
   notify: boolean;
+  status?: 'active' | 'draft';
 }): Promise<SponsrManageResult> {
   const slug = slugOf(input.project);
   const suffix = input.postId ? String(input.postId) : 'new';
@@ -169,6 +171,7 @@ export async function saveSponsrManagePost(session: SponsrSession, input: {
       html: input.html,
       notify: input.notify,
       date: sponsrClock(),
+      status: input.status,
     }),
   );
   const response = sent.json && typeof sent.json === 'object'

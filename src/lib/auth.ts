@@ -79,7 +79,9 @@ export const auth = betterAuth({
   session: {
     expiresIn: 60 * 60 * 24 * 30,
     updateAge: 60 * 60 * 24,
-    cookieCache: { enabled: true, maxAge: 60 * 5 },
+    // Кэш сессии в cookie на 5 минут: битая кука заставляла getSession вернуть
+    // «нет сессии», не глядя на живой токен в базе, и человека выкидывало.
+    cookieCache: { enabled: false },
   },
 
   advanced: {

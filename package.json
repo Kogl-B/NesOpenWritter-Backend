@@ -13,8 +13,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/lib/nowpayments.test.ts src/lib/publish/publish.test.ts src/lib/publish/kit.test.ts src/lib/publish/boostySession.test.ts src/lib/publish/boostyPost.test.ts src/lib/publish/sponsrClient.test.ts src/lib/publish/sponsrSession.test.ts src/lib/publish/sponsrManage.test.ts src/lib/chapterStage.test.ts src/lib/ai/openaiImage.test.ts src/lib/ai/receipt.test.ts src/lib/geo/policy.test.ts src/lib/geo/lookup.test.ts src/lib/notify/drafts.test.ts src/lib/requestSecurity.test.ts",
-    "test:advertising": "tsx --test src/routes/advertising.integration.test.ts",
+    "test": "tsx --test src/lib/browserWritePolicy.test.ts src/lib/currencyRefresh.test.ts src/lib/paymentCurrency.test.ts src/lib/walletExchange.test.ts src/lib/authorSubscriptions.test.ts src/lib/nowpayments.test.ts src/lib/publish/publish.test.ts src/lib/publish/kit.test.ts src/lib/publish/boostySession.test.ts src/lib/publish/boostyPost.test.ts src/lib/publish/sponsrClient.test.ts src/lib/publish/sponsrSession.test.ts src/lib/publish/sponsrManage.test.ts src/lib/publish/authorToday.test.ts src/lib/publish/litnet.test.ts src/lib/publish/wattpad.test.ts src/lib/publish/discord.test.ts src/lib/publish/vault.test.ts src/lib/publish/telegramBot.test.ts src/lib/chapterStage.test.ts src/lib/ai/openaiImage.test.ts src/lib/ai/place.test.ts src/lib/ai/receipt.test.ts src/lib/geo/policy.test.ts src/lib/catalogSearch.test.ts src/lib/geo/lookup.test.ts src/lib/notify/drafts.test.ts src/lib/storedFiles.test.ts src/lib/accountPhotos.test.ts src/lib/photoAccess.test.ts src/lib/timeline/date.test.ts src/lib/timeline/proposals.test.ts src/lib/timeline/publication.test.ts src/lib/requestSecurity.test.ts",
     "lint": "eslint src --max-warnings 0",
     "format": "prettier --write \"src/**/*.ts\"",
     "db:up": "docker compose up -d",
@@ -24,6 +23,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
+    "test:advertising": "tsx --test src/routes/advertising.integration.test.ts",
     "test:stats": "tsx --test src/routes/metrics.integration.test.ts",
     "test:project-isolation": "tsx --test src/routes/projectIsolation.integration.test.ts",
     "test:drive-isolation": "tsx --test src/lib/driveIsolation.integration.test.ts"
@@ -36,10 +36,12 @@
     "@fastify/cors": "^10.0.1",
     "@fastify/helmet": "^13.0.0",
     "@fastify/sensible": "^6.0.1",
+    "@napi-rs/canvas": "1.2.1",
     "@prisma/client": "^5.22.0",
     "@sentry/node": "10.78.0",
     "better-auth": "1.7.28",
     "dotenv": "^17.4.2",
+    "fast-xml-parser": "^5.12.0",
     "fastify": "5.12.8",
     "fastify-plugin": "^5.1.0",
     "geoip-lite": "^2.0.3",
@@ -63,11 +65,11 @@
   "pnpm": {
     "overrides": {
       "fast-uri@3": "3.1.9",
-      "fast-copy@3": "3.1.0",
+      "brace-expansion@5": "5.0.12",
       "fast-xml-parser@5": "5.12.0",
+      "fast-copy@3": "3.1.0",
       "js-yaml@4": "4.3.2",
       "brace-expansion@1": "1.1.22",
-      "brace-expansion@5": "5.0.12",
       "minimatch@10": "11.0.1",
       "tsx>esbuild": "0.28.2"
     }

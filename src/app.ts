@@ -18,6 +18,7 @@ import { projectRoutes } from './routes/projects.js';
 import { characterRoutes } from './routes/characters.js';
 import { itemRoutes } from './routes/items.js';
 import { locationRoutes } from './routes/locations.js';
+import { timelineAnalysisRoutes } from './routes/timelineAnalysis.js';
 import { eventRoutes } from './routes/events.js';
 import { chapterRoutes } from './routes/chapters.js';
 import { tagRoutes } from './routes/tags.js';
@@ -45,6 +46,7 @@ import { publishRoutes } from './routes/publish.js';
 import { notificationRoutes } from './routes/notifications.js';
 import { geoAdminRoutes } from './routes/geo.js';
 import { initSentry, captureError } from './lib/sentry.js';
+import { blockedAutomation, ROBOTS_TAG } from './lib/botPolicy.js';
 import { recordRequest, getDbStats, requestContext } from './lib/metrics.js';
 import { getProjectAccess } from './lib/access.js';
 
@@ -55,6 +57,15 @@ export async function buildApp(): Promise<FastifyInstance> {
     logger: loggerConfig,
     disableRequestLogging: false,
     trustProxy: true,
+  });
+
+  app.addHook('onRequest', async (req, reply) => {
+    reply.header('X-Robots-Tag', ROBOTS_TAG);
+    const path = req.url.split('?', 1)[0];
+    if (path !== '/health' && path !== '/api/health' && path !== '/api/payments/nowpayments/webhook' &&
+        blockedAutomation(req.headers['user-agent'])) {
+      return reply.status(403).send({ error: 'Автоматизированный доступ запрещён.' });
+    }
   });
 
   // --- Performance metrics middleware ---
@@ -163,6 +174,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(itemRoutes);
   await app.register(locationRoutes);
   await app.register(eventRoutes);
+  await app.register(timelineAnalysisRoutes);
   await app.register(chapterRoutes);
   await app.register(tagRoutes);
   await app.register(mapRoutes);

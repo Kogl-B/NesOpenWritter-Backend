@@ -3,8 +3,10 @@ import type { FastifyPluginAsync } from 'fastify';
 import { assertProjectOwnership } from '../lib/access.js';
 import { getUserPlan, getStorageUsedBytes } from './account.js';
 import { getTier, MB } from '../lib/tiers.js';
-import { presignUpload, isR2Configured } from '../lib/r2.js';
-import { presignUploadSchema } from '../lib/schemas.js';
+import { isR2Configured, objectSizeBytes, presignUpload } from '../lib/r2.js';
+import { completeUploadSchema, presignUploadSchema } from '../lib/schemas.js';
+import { rememberStoredFile } from '../lib/storedFileSync.js';
+import { parseStoredKey } from '../lib/storedFiles.js';
 
 type ProjectParam = { projectId: string };
 
@@ -45,6 +47,32 @@ export const uploadRoutes: FastifyPluginAsync = async (app) => {
         sizeBytes: input.sizeBytes,
       });
       return { ...result, sizeBytes: input.sizeBytes ?? null };
+    },
+  );
+
+  app.post<{ Params: ProjectParam }>(
+    '/api/projects/:projectId/uploads/complete',
+    async (req, reply) => {
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const input = completeUploadSchema.parse(req.body);
+      const place = parseStoredKey(input.key, req.user!.id);
+      if (!place || place.projectId !== req.params.projectId) {
+        return reply.status(400).send({ error: 'Файл не из хранилища этого кабинета' });
+      }
+      const sizeBytes = await objectSizeBytes(input.key);
+      if (sizeBytes == null) {
+        return reply.status(404).send({ error: 'Файл в хранилище не найден' });
+      }
+      await rememberStoredFile({
+        userId: req.user!.id,
+        projectId: req.params.projectId,
+        key: input.key,
+        sizeBytes,
+        kind: place.kind,
+      });
+      return { key: input.key, sizeBytes };
     },
   );
 };

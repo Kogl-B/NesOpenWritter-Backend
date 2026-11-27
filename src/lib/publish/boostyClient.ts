@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { assertKitUrl } from './kit.js';
 import {
   boostyAttachments,
@@ -10,6 +12,8 @@ import {
   type BoostyImage,
 } from './boostyPost.js';
 import {
+  boostyLoginFailure,
+  boostyLoginSession,
   boostyProfile,
   sessionExpired,
   sessionFromRefresh,
@@ -71,6 +75,38 @@ async function currentUser(session: BoostySession): Promise<{ ok: boolean; statu
   }
   const body: unknown = await response.json().catch(() => null);
   return { ok: response.ok, status: response.status, body };
+}
+
+/** Вход по почте и паролю. Дальше сессия та же, что после cookie auth. */
+export async function loginBoosty(input: { login: string; password: string }): Promise<BoostyIdentity> {
+  const deviceId = randomUUID();
+  let response: Response;
+  try {
+    response = await fetch(`${API}/v1/user/auth/email/token`, {
+      method: 'POST',
+      headers: {
+        'user-agent': USER_AGENT,
+        accept: 'application/json',
+        'content-type': 'application/x-www-form-urlencoded',
+        origin: 'https://boosty.to',
+        referer: 'https://boosty.to/',
+      },
+      body: new URLSearchParams({ email: input.login.trim(), password: input.password }),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch {
+    throw new Error('Boosty не ответил');
+  }
+  const json: unknown = await response.json().catch(() => null);
+  let session: BoostySession;
+  try {
+    session = boostyLoginSession(json, deviceId);
+  } catch (err) {
+    if (!response.ok) throw new Error(boostyLoginFailure(response.status, json));
+    throw err;
+  }
+  return identifyBoosty(session);
 }
 
 /** Проверяет сессию запросом текущего пользователя и при необходимости обновляет токен. */
@@ -174,6 +210,7 @@ export async function updateBoostyPost(
 ): Promise<{ session: BoostySession; post: BoostyCreatedPost }> {
   const id = boostyPostId(postId);
   const result = await authed(session, (active) => send(active, 'PUT', `/v1/blog/${blog}/post/${id}`, boostyDraftForm(draft)));
+  if (result.status === 404) throw new Error('Boosty не нашёл пост');
   if (result.status < 200 || result.status >= 300) {
     throw new Error(failureText(result.status, result.body, 'Boosty не изменил пост'));
   }
@@ -182,6 +219,21 @@ export async function updateBoostyPost(
   } catch {
     return readBoostyPost(result.session, blog, id);
   }
+}
+
+/** Убирает пост из блога. Уже удалённый пост не считается ошибкой. */
+export async function deleteBoostyPost(
+  session: BoostySession,
+  blog: string,
+  postId: string,
+): Promise<{ session: BoostySession }> {
+  const id = boostyPostId(postId);
+  const result = await authed(session, (active) => send(active, 'DELETE', `/v1/blog/${blog}/post/${id}`));
+  if (result.status === 404) return { session: result.session };
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(failureText(result.status, result.body, 'Boosty не убрал пост'));
+  }
+  return { session: result.session };
 }
 
 /** Читает пост и список прикреплённых фото и ссылок. */

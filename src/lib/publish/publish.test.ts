@@ -3,7 +3,10 @@ import { describe, it } from 'node:test';
 
 import { discordPayload, sponsrPayload, telegramUrl, vkParams, vkUrl } from './payload.js';
 import { announcement, chapterBlocks, sponsrText, sponsrTitle } from './text.js';
-import { bookIsPublished, chapterIsHidden, revealMetadata } from './visibility.js';
+import { bookIsPublished, chapterIsHidden, hideMetadata, revealMetadata } from './visibility.js';
+import { footnoteLines, projectFootnotes } from '../footnoteText.js';
+import { findDirectoryReference } from '../worldDirectory.js';
+import { readerPages } from '../protectedReader.js';
 
 const doc = {
   type: 'doc',
@@ -15,6 +18,34 @@ const doc = {
 };
 
 describe('chapter text', () => {
+  it('размещает ссылку на справочник внутри защищённой страницы без её текста и полей', () => {
+    const id = '95a3e095-e698-4f05-928c-a6c7b3ece649';
+    const attrs = { id, tableId: 'table-1', rowId: 'row-3', label: 'Описание маяка', fields: ['description'] };
+    const chapter = { type: 'doc', content: [{ type: 'paragraph', content: [
+      { type: 'text', text: 'Герой увидел маяк.' },
+      { type: 'directoryReference', attrs },
+    ] }] };
+    assert.deepEqual(findDirectoryReference(chapter, id), attrs);
+    assert.equal(findDirectoryReference(chapter, 'another-id'), undefined);
+    const page = readerPages('manuscript-directory-test', chapter)[0];
+    assert.equal(page?.kind, 'text');
+    if (page?.kind !== 'text') return;
+    assert.match(page.lines.join(' '), /\[Справка\]/);
+    assert.equal(page.references[0]?.id, id);
+    assert.ok((page.references[0]?.width ?? 0) > 0);
+    assert.ok(!JSON.stringify(page).includes(attrs.label));
+  });
+  it('сохраняет новые и прежние сноски в читаемом виде для защищённой читалки и EPUB', () => {
+    const chapter = { type: 'doc', content: [{ type: 'paragraph', content: [
+      { type: 'text', text: 'Начало', marks: [{ type: 'footnote', attrs: { text: 'Старый источник' } }] },
+      { type: 'text', text: ' и конец' },
+      { type: 'footnoteReference', attrs: { id: 'n2', text: 'Новый источник' } },
+    ] }] };
+    const notes: string[] = [];
+    assert.deepEqual(chapterBlocks(projectFootnotes(chapter, notes)), ['Начало[1] и конец[2]']);
+    assert.deepEqual(footnoteLines(notes), ['Сноски', '1. Старый источник', '2. Новый источник']);
+    assert.deepEqual(chapterBlocks(chapter), ['Начало и конец']);
+  });
   it('берёт непустые абзацы и экранирует HTML Sponsr', () => {
     const blocks = chapterBlocks(doc);
     assert.deepEqual(blocks, ['Первая строка', 'Вторая <b>']);
@@ -79,5 +110,7 @@ describe('visibility', () => {
     assert.equal(bookIsPublished({ catalog: { published: true } }), true);
     assert.equal(bookIsPublished({ catalog: { published: 'true' } }), false);
     assert.equal(revealMetadata({ audio: 'x', public: false }).public, true);
+    assert.equal(hideMetadata({ audio: 'x', public: true }).public, false);
+    assert.equal(hideMetadata({ audio: 'x' }).audio, 'x');
   });
 });

@@ -206,7 +206,7 @@ export const chapterCreateSchema = z.object({
   eventId: nullableId,
   locationId: nullableId,
   metadata: jsonObject.optional(),
-  stage: chapterStageEnum.optional(),
+  stage: chapterStageEnum.transform((stage) => stage === 'writing' ? 'new' : stage).optional(),
   publishAt: z.string().max(40).nullable().optional(),
   tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
 });
@@ -309,6 +309,10 @@ export const presignUploadSchema = z.object({
   contentType: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif', 'image/bmp', 'image/x-icon']),
   kind: z.enum(['portrait', 'item', 'map', 'other']).default('other'),
   sizeBytes: z.number().int().positive().max(50 * 1024 * 1024),
+});
+
+export const completeUploadSchema = z.object({
+  key: z.string().trim().min(1).max(500),
 });
 
 // ----- Chapter content / revisions / mentions (Этап 4) ----------------------

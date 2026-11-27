@@ -5,6 +5,14 @@ export const NOTICE_KINDS = [
   'blog_post',
   'blog_comment',
   'reader_report',
+  'publish_error',
+  'book_subscription',
+  'follow',
+  'blog_donation',
+  'blog_report',
+  'book_status',
+  'digest',
+  'ai_result',
 ] as const;
 
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
@@ -56,14 +64,9 @@ export function noticeAllowed(settings: unknown, kind: NoticeKind): boolean {
 }
 
 export function noticePrefs(settings: unknown): Record<NoticeKind, boolean> {
-  return {
-    chapter: noticeChoice(settings, 'chapter'),
-    book_comment: noticeChoice(settings, 'book_comment'),
-    comment_reply: noticeChoice(settings, 'comment_reply'),
-    blog_post: noticeChoice(settings, 'blog_post'),
-    blog_comment: noticeChoice(settings, 'blog_comment'),
-    reader_report: noticeChoice(settings, 'reader_report'),
-  };
+  return Object.fromEntries(
+    NOTICE_KINDS.map((kind) => [kind, noticeChoice(settings, kind)]),
+  ) as Record<NoticeKind, boolean>;
 }
 
 export function mergeNoticeSettings(
@@ -178,4 +181,231 @@ export function readerReportNotice(input: {
     href: '/account#reader-reports',
     eventKey: `report:${input.reportId}`,
   }];
+}
+
+export function publishErrorNotice(input: {
+  userId: string;
+  platformName: string;
+  bookTitle: string;
+  chapterTitle: string;
+  error: string;
+  deliveryId: string;
+}): NoticeDraft[] {
+  if (!input.userId || !input.deliveryId) return [];
+  const platform = clip(input.platformName || 'Площадка', 40);
+  const book = clip(input.bookTitle, 80);
+  const chapter = clip(input.chapterTitle, 80);
+  const place = book && chapter ? `«${book}»: ${chapter}` : book ? `«${book}»` : chapter;
+  const error = clip(input.error, 120);
+  return [{
+    userId: input.userId,
+    kind: 'publish_error',
+    title: 'Площадка не приняла главу',
+    body: clip([platform, place, error].filter(Boolean).join('. '), BODY),
+    href: '/account/autopost',
+    eventKey: `publish-fail:${input.deliveryId}`,
+  }];
+}
+
+export function followNotice(input: {
+  authorId: string;
+  actorId: string;
+  actorName: string;
+}): NoticeDraft[] {
+  if (!input.authorId || !input.actorId || input.authorId === input.actorId) return [];
+  return [{
+    userId: input.authorId,
+    kind: 'follow',
+    title: 'Блог начали отслеживать',
+    body: clip(input.actorName || 'Читатель', 80),
+    href: `/authors/${input.authorId}`,
+    eventKey: `follow:${input.actorId}`,
+  }];
+}
+
+export function bookSubscriptionNotice(input: {
+  ownerId: string;
+  actorId: string;
+  actorName: string;
+  projectId: string;
+  bookTitle: string;
+}): NoticeDraft[] {
+  if (!input.ownerId || !input.actorId || input.ownerId === input.actorId || !input.projectId) return [];
+  const book = clip(input.bookTitle, 120);
+  return [{
+    userId: input.ownerId,
+    kind: 'book_subscription',
+    title: clip(book ? `Подписка на «${book}»` : 'Подписка на книгу', TITLE),
+    body: clip(input.actorName || 'Читатель', 80),
+    href: `/books/${input.projectId}`,
+    eventKey: `book-sub:${input.actorId}:${input.projectId}`,
+  }];
+}
+
+export function donationNotice(input: {
+  authorId: string;
+  actorId: string;
+  actorName: string;
+  amountCents: number;
+  postId: string;
+  postTitle: string;
+  donationId: string;
+  note?: string;
+}): NoticeDraft[] {
+  if (!input.authorId || !input.actorId || input.authorId === input.actorId || !input.donationId) return [];
+  const title = clip(input.postTitle, 100);
+  const name = clip(input.actorName || 'Читатель', 80);
+  const note = clip(input.note ?? '', 80);
+  const money = `${(input.amountCents / 100).toLocaleString('ru-RU')} BYN`;
+  return [{
+    userId: input.authorId,
+    kind: 'blog_donation',
+    title: clip(title ? `Донат к «${title}»` : 'Донат к записи', TITLE),
+    body: clip(note ? `${name}, ${money}. ${note}` : `${name}, ${money}`, BODY),
+    href: `/blog/${input.postId}`,
+    eventKey: `donation:${input.donationId}`,
+  }];
+}
+
+export function blogReportNotice(input: {
+  authorId: string;
+  actorId: string;
+  postId: string;
+  postTitle: string;
+  reportId: string;
+  note: string;
+}): NoticeDraft[] {
+  if (!input.authorId || input.authorId === input.actorId || !input.reportId) return [];
+  const title = clip(input.postTitle, 100);
+  return [{
+    userId: input.authorId,
+    kind: 'blog_report',
+    title: clip(title ? `Жалоба на «${title}»` : 'Жалоба на запись', TITLE),
+    body: clip(input.note, BODY),
+    href: `/blog/${input.postId}`,
+    eventKey: `blog-report:${input.reportId}`,
+  }];
+}
+
+export function bookStatusNotices(input: {
+  actorId: string;
+  subscriberIds: string[];
+  projectId: string;
+  bookTitle: string;
+  status: 'complete' | 'frozen';
+  at?: number;
+}): NoticeDraft[] {
+  if (!input.projectId) return [];
+  const book = clip(input.bookTitle, 120);
+  const done = input.status === 'complete';
+  const title = done
+    ? (book ? `«${book}» завершена` : 'Книга завершена')
+    : (book ? `«${book}» заморожена` : 'Книга заморожена');
+  const stamp = input.at ?? Date.now();
+  return others(input.subscriberIds, input.actorId).map((userId) => ({
+    userId,
+    kind: 'book_status',
+    title: clip(title, TITLE),
+    body: done ? 'Теперь книга завершена' : 'Теперь книга заморожена',
+    href: `/books/${input.projectId}`,
+    eventKey: `book-status:${input.projectId}:${input.status}:${stamp}`,
+  }));
+}
+
+const DIGEST_SPLIT = '\n\u001e';
+
+export type DigestBucket = 'likes' | 'reading' | 'reactions';
+
+export type DigestState = Record<DigestBucket, string[]>;
+
+export function digestDay(date: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+export function bookDigestKey(projectId: string, day: string): string {
+  return `day:${day}:book:${projectId}`;
+}
+
+export function blogDigestKey(postId: string, day: string): string {
+  return `day:${day}:blog:${postId}`;
+}
+
+function plural(n: number, one: string, few: string, many: string): string {
+  const n10 = n % 10;
+  const n100 = n % 100;
+  const word = n10 === 1 && n100 !== 11 ? one : n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14) ? few : many;
+  return `${n} ${word}`;
+}
+
+function readingLine(n: number): string {
+  const n10 = n % 10;
+  const n100 = n % 100;
+  if (n10 === 1 && n100 !== 11) return `${n} человек читает`;
+  if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return `${n} человека читают`;
+  return `${n} человек читают`;
+}
+
+function digestIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 64))].sort();
+}
+
+export function readDigest(body: string): DigestState {
+  const raw = body.split(DIGEST_SPLIT)[1] ?? '';
+  if (!raw) return { likes: [], reading: [], reactions: [] };
+  try {
+    const parsed = JSON.parse(raw) as Partial<DigestState>;
+    return {
+      likes: digestIds(parsed.likes),
+      reading: digestIds(parsed.reading),
+      reactions: digestIds(parsed.reactions),
+    };
+  } catch {
+    return { likes: [], reading: [], reactions: [] };
+  }
+}
+
+export function digestText(state: DigestState): string {
+  const parts: string[] = [];
+  if (state.likes.length > 0) parts.push(plural(state.likes.length, 'лайк', 'лайка', 'лайков'));
+  if (state.reading.length > 0) parts.push(readingLine(state.reading.length));
+  if (state.reactions.length > 0) parts.push(plural(state.reactions.length, 'реакция', 'реакции', 'реакций'));
+  return parts.join(' · ');
+}
+
+export function digestHeading(subject: string): string {
+  const title = clip(subject, 100);
+  return clip(title ? `Отметки «${title}»` : 'Отметки за день', TITLE);
+}
+
+export function publicNoticeBody(body: string): string {
+  return (body.split(DIGEST_SPLIT)[0] ?? '').trim();
+}
+
+function packDigest(state: DigestState): string {
+  return `${digestText(state)}${DIGEST_SPLIT}${JSON.stringify(state)}`;
+}
+
+/** null — сводку за этот день нужно убрать: отметок не осталось. */
+export function applyDigest(body: string, bucket: DigestBucket, actorId: string, on: boolean): string | null {
+  if (!actorId) return null;
+  const state = readDigest(body);
+  const previous = state[bucket];
+  const set = new Set(previous);
+  if (on) set.add(actorId);
+  else set.delete(actorId);
+  const next = [...set].sort();
+  const unchanged = next.length === previous.length && next.every((id, index) => id === previous[index]);
+  if (unchanged) {
+    const total = state.likes.length + state.reading.length + state.reactions.length;
+    return total === 0 ? null : body;
+  }
+  state[bucket] = next;
+  if (state.likes.length + state.reading.length + state.reactions.length === 0) return null;
+  return packDigest(state);
 }

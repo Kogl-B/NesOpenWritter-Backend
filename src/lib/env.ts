@@ -63,6 +63,9 @@ const envSchema = z.object({
   GEO_EDGE_TOKEN: z.string().optional().default(''),
   // Только не production: подменить страну посетителя, чтобы проверить ограничение локально.
   GEO_DEV_COUNTRY: z.string().optional().default(''),
+
+  // Общий бот автопоста. Пусто — карточка Telegram на сайте скажет, что бот не настроен.
+  TELEGRAM_BOT_TOKEN: z.string().optional().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);

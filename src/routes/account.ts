@@ -3,23 +3,30 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
 import { prisma } from '../lib/prisma.js';
-import { TIERS, DEFAULT_TIER, MB, getTier, isTierId, tierPrices } from '../lib/tiers.js';
+import { TIERS, MB, getTier, isTierId, tierPrices } from '../lib/tiers.js';
 import { getRates, bynPerUnit } from '../lib/currency.js';
+import { currencySources } from '../lib/paymentCurrency.js';
+import { syncStoredFiles } from '../lib/storedFileSync.js';
+import { changeServicePlan, serviceAccess } from '../lib/serviceSubscriptions.js';
 
-const planUpdateSchema = z.object({ plan: z.string().trim().min(1).max(32) });
+const planUpdateSchema = z.object({
+  plan: z.string().trim().min(1).max(32),
+  payment: z.object({ requestId: z.string().uuid(), amountCents: z.number().int().positive() }).optional(),
+});
 
 /**
- * Занятое место пользователя: сумма байтов текстовых/JSON-полей всех
- * сущностей его проектов. Колонки camelCase (в схеме нет @map на полях),
- * таблицы — snake_case (@@map). Загрузки в R2 пока не настроены; когда
- * появятся, к этой сумме добавится учёт по объектам хранилища.
+ * Занятое место текстов пользователя. Файлы кабинета считаются отдельно,
+ * по таблице stored_files, и прибавляются к этой сумме.
  */
 const storageSql = (userId: string) => Prisma.sql`
   SELECT
     COALESCE((SELECT SUM(OCTET_LENGTH(pr."name") + OCTET_LENGTH(COALESCE(pr."description",'')) + OCTET_LENGTH(pr."settings"::text))
       FROM projects pr WHERE pr."ownerId" = ${userId}), 0)
+  + COALESCE((SELECT SUM(OCTET_LENGTH(u."settings"::text)) FROM users u WHERE u.id = ${userId}), 0)
+  + COALESCE((SELECT SUM(OCTET_LENGTH(al."avatar")) FROM author_levels al WHERE al."authorId" = ${userId}), 0)
   + COALESCE((SELECT SUM(OCTET_LENGTH(ch."name") + OCTET_LENGTH(COALESCE(ch."shortName",'')) + OCTET_LENGTH(COALESCE(ch."summary",''))
-      + OCTET_LENGTH(COALESCE(ch."biography",'')) + OCTET_LENGTH(COALESCE(ch."faction",'')) + OCTET_LENGTH(ch."metadata"::text))
+      + OCTET_LENGTH(COALESCE(ch."biography",'')) + OCTET_LENGTH(COALESCE(ch."faction",''))
+      + OCTET_LENGTH(COALESCE(ch."portraitPath",'')) + OCTET_LENGTH(ch."metadata"::text))
       FROM characters ch JOIN projects p ON ch."projectId" = p.id WHERE p."ownerId" = ${userId}), 0)
   + COALESCE((SELECT SUM(OCTET_LENGTH(COALESCE(cr."description",'')))
       FROM character_relations cr JOIN projects p ON cr."projectId" = p.id WHERE p."ownerId" = ${userId}), 0)
@@ -75,26 +82,32 @@ const storageSql = (userId: string) => Prisma.sql`
 `;
 
 export async function getUserPlan(userId: string): Promise<string> {
-  const row = await prisma.user.findUnique({ where: { id: userId }, select: { plan: true } });
-  return row?.plan ?? DEFAULT_TIER;
+  return (await serviceAccess(prisma, userId)).plan;
 }
 
 export async function getStorageUsedBytes(userId: string): Promise<number> {
-  const rows = await prisma.$queryRaw<Array<{ total: bigint | number }>>(storageSql(userId));
+  await syncStoredFiles(userId);
+  const [rows, files] = await Promise.all([
+    prisma.$queryRaw<Array<{ total: bigint | number }>>(storageSql(userId)),
+    prisma.storedFile.aggregate({ where: { userId }, _sum: { sizeBytes: true } }),
+  ]);
   const total = rows[0]?.total;
-  return typeof total === 'bigint' ? Number(total) : Number(total ?? 0);
+  const textBytes = typeof total === 'bigint' ? Number(total) : Number(total ?? 0);
+  return textBytes + (files._sum.sizeBytes ?? 0);
 }
 
 export interface UsageInfo {
   plan: string;
   planName: string;
+  expiresAt: Date | null;
   aiBalanceCents: number;
   projects: { used: number; limit: number | null };
   storage: { usedBytes: number; limitBytes: number | null };
 }
 
 export async function getUsageInfo(userId: string): Promise<UsageInfo> {
-  const tier = getTier(await getUserPlan(userId));
+  const { plan, expiresAt } = await serviceAccess(prisma, userId);
+  const tier = getTier(plan);
   const [owned, usedBytes] = await Promise.all([
     prisma.project.count({ where: { ownerId: userId } }),
     getStorageUsedBytes(userId),
@@ -106,6 +119,7 @@ export async function getUsageInfo(userId: string): Promise<UsageInfo> {
   return {
     plan: tier.id,
     planName: tier.name,
+    expiresAt,
     aiBalanceCents: balance?.aiBalanceCents ?? 0,
     projects: { used: owned, limit: tier.projectLimit },
     storage: {
@@ -116,8 +130,9 @@ export async function getUsageInfo(userId: string): Promise<UsageInfo> {
 }
 
 export const accountRoutes: FastifyPluginAsync = async (app) => {
+  app.get('/api/currency/rates', async () => currencySources());
+
   // Витрина тарифов — публичная. Цены пересчитываются из BYN по курсу НБ РБ
-  // (обновление раз в сутки после 12:00 по Минску, см. lib/currency.ts)
   app.get('/api/tiers', async () => {
     const rates = await getRates();
     const bynUsd = bynPerUnit(rates.USD);
@@ -156,19 +171,17 @@ export const accountRoutes: FastifyPluginAsync = async (app) => {
     if (!isTierId(input.plan)) {
       return reply.status(400).send({ error: `Неизвестный тариф: ${input.plan}` });
     }
-    const tier = getTier(input.plan);
-    const owned = await prisma.project.count({ where: { ownerId: req.user!.id } });
-    await prisma.user.update({
-      where: { id: req.user!.id },
-      data: { plan: tier.id },
-    });
+    const result = await changeServicePlan(prisma, req.user!.id, input.plan, input.payment);
+    if ('error' in result) return reply.status(result.status).send({ error: result.error });
     const usage = await getUsageInfo(req.user!.id);
+    const tier = getTier(usage.plan);
+    const owned = usage.projects.used;
     // Даунгрейд с превышением лимита проектов: существующие не удаляем,
     // но предупреждаем — новые создать будет нельзя
     const warning =
       tier.projectLimit != null && owned > tier.projectLimit
         ? `У вас ${owned} проектов, а тариф «${tier.name}» допускает ${tier.projectLimit}. Проекты остались на месте, но создать новый не получится, пока не освободите место.`
         : null;
-    return { ...usage, warning };
+    return { ...usage, warning, paymentId: result.paymentId };
   });
 };
