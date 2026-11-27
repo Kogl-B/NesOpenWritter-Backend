@@ -446,8 +446,8 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
     if (await denyBlogGeo(req, reply)) return reply;
   });
 
-  app.get('/api/blog', async (req) => ({ posts: await publishedCards(req) }));
-  app.get('/api/blog/feed', { preHandler: [async (_req, reply) => { reply.header('Cache-Control', 'private, no-store'); }] }, filteredFeed);
+  app.get('/api/blog', { config: { rateLimit: { max: 120 } } }, async (req) => ({ posts: await publishedCards(req) }));
+  app.get('/api/blog/feed', { config: { rateLimit: { max: 120 } }, preHandler: [async (_req, reply) => { reply.header('Cache-Control', 'private, no-store'); }] }, filteredFeed);
 
   app.get<{ Params: { authorId: string }; Querystring: { posts?: string } }>('/api/blog/authors/:authorId', async (req) => {
     const author = await prisma.user.findUnique({

@@ -1,4 +1,5 @@
-import type { FastifyPluginAsync } from 'fastify';
+import { requestNetwork } from '../lib/requestNetwork.js';
+import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { getUserPlan } from './account.js';
@@ -28,9 +29,9 @@ const adEventSchema = z.object({
   browserId: browserIdSchema,
 });
 
-function markerOf(req: { ip: string; user?: { id: string } | null }, browserId?: string): string {
+function markerOf(req: FastifyRequest, browserId?: string): string {
   if (browserId) return `browser:${browserId}`;
-  return req.user ? `account:${req.user.id}` : `network:${req.ip}`;
+  return req.user ? `account:${req.user.id}` : `network:${requestNetwork(req).address ?? 'unknown'}`;
 }
 
 async function audienceShowsAds(userId?: string): Promise<boolean> {
@@ -47,7 +48,7 @@ export const metricsRoutes: FastifyPluginAsync = async (app) => {
     }, 'Site statistics request failed');
   });
 
-  app.post('/api/metrics/visit', async (req, reply) => {
+  app.post('/api/metrics/visit', { config: { rateLimit: { max: 180 } } }, async (req, reply) => {
     const input = visitSchema.parse(req.body ?? {});
     if (!isVisitArea(input.area)) return reply.status(400).send({ error: 'Неизвестный раздел' });
     await recordVisit(input.area, markerOf(req, input.browserId), input.browserId);
@@ -90,7 +91,7 @@ export const metricsRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
-  app.post<{ Params: { slot: string } }>('/api/ads/:slot/event', async (req, reply) => {
+  app.post<{ Params: { slot: string } }>('/api/ads/:slot/event', { config: { rateLimit: { max: 180 } } }, async (req, reply) => {
     const input = adEventSchema.parse(req.body ?? {});
     if (!(await audienceShowsAds(req.user?.id))) return reply.status(204).send();
     const ad = await prisma.houseAd.findUnique({

@@ -70,13 +70,11 @@ function mentions(book: SearchableBook, part: string): boolean {
   return [...book.tags, ...book.genreNames].some((item) => item.toLowerCase().includes(part));
 }
 
-/** Выдача каталога. Жанр берётся с потомками, метки требуются все, исключённая метка выкидывает книгу. */
-export function filterCatalogBooks<T extends SearchableBook>(
-  books: T[],
+export function catalogFilters(
   query: CatalogQuery,
   expandGenre: (id: string) => string[],
-  now = Date.now(),
-): T[] {
+  now: number,
+) {
   const q = (query.q ?? '').trim().toLowerCase();
   const author = (query.author ?? '').trim().toLowerCase();
   const cycle = (query.cycle ?? '').trim().toLowerCase();
@@ -88,10 +86,26 @@ export function filterCatalogBooks<T extends SearchableBook>(
     ? new Set(genreIds.flatMap((id) => expandGenre(id)))
     : null;
   const pages = pageBounds(query);
-  const minWords = pages ? 0 : Number(query.minWords ?? 0) || 0;
-  const maxWords = pages ? 0 : Number(query.maxWords ?? 0) || 0;
-  const updatedDays = Number(query.updatedDays ?? 0) || 0;
-  const freshAfter = updatedDays > 0 ? now - updatedDays * 86400000 : 0;
+  const min = Number(query.minWords ?? 0);
+  const max = Number(query.maxWords ?? 0);
+  const minWords = !pages && Number.isFinite(min) ? min : 0;
+  const maxWords = !pages && Number.isFinite(max) ? max : 0;
+  const updatedDays = Number(query.updatedDays ?? 0);
+  const freshAfter = updatedDays > 0 && Number.isFinite(updatedDays)
+    ? Math.max(-8_640_000_000_000_000, now - updatedDays * 86_400_000)
+    : null;
+  return { q, author, cycle, tags, excluded, statuses, allowed, pages, minWords, maxWords, freshAfter };
+}
+
+/** Выдача каталога. Жанр берётся с потомками, метки требуются все, исключённая метка выкидывает книгу. */
+export function filterCatalogBooks<T extends SearchableBook>(
+  books: T[],
+  query: CatalogQuery,
+  expandGenre: (id: string) => string[],
+  now = Date.now(),
+): T[] {
+  const { q, author, cycle, tags, excluded, statuses, allowed, pages, minWords, maxWords, freshAfter } =
+    catalogFilters(query, expandGenre, now);
 
   const found = books.filter((book) => {
     if (allowed && !book.genres.some((id) => allowed.has(id))) return false;
@@ -106,7 +120,7 @@ export function filterCatalogBooks<T extends SearchableBook>(
       const count = pageCount(book.words);
       if (count < pages.min || count > pages.max) return false;
     }
-    if (freshAfter && Date.parse(book.textUpdatedAt) < freshAfter) return false;
+    if (freshAfter !== null && Date.parse(book.textUpdatedAt) < freshAfter) return false;
     if (!q) return true;
     const hay = [book.title, book.authorName, book.description, book.cycle, ...book.tags, ...book.genreNames].join(' ').toLowerCase();
     return hay.includes(q);

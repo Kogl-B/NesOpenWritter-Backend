@@ -4,10 +4,12 @@ import cookie from '@fastify/cookie';
 import helmet from '@fastify/helmet';
 import sensible from '@fastify/sensible';
 import compress from '@fastify/compress';
+import rateLimit from '@fastify/rate-limit';
 import { ZodError } from 'zod';
 
 import { browserOrigins, env } from './lib/env.js';
 import { isBrowserMutationAllowed, isReadMethod } from './lib/requestSecurity.js';
+import { requestNetwork } from './lib/requestNetwork.js';
 import { loggerConfig } from './lib/logger.js';
 import authPlugin from './plugins/auth.js';
 import { healthRoutes } from './routes/health.js';
@@ -56,8 +58,13 @@ export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
     logger: loggerConfig,
     disableRequestLogging: false,
-    trustProxy: true,
   });
+
+  if (env.NODE_ENV === 'production' && process.env.RAILWAY_PUBLIC_DOMAIN && !env.GEO_EDGE_TOKEN) {
+    const error = new Error('GEO_EDGE_TOKEN is missing on the public Railway API');
+    app.log.error({ code: 'EDGE_NETWORK_CONTEXT_UNAVAILABLE', err: error }, error.message);
+    captureError(error, { code: 'EDGE_NETWORK_CONTEXT_UNAVAILABLE' });
+  }
 
   app.addHook('onRequest', async (req, reply) => {
     reply.header('X-Robots-Tag', ROBOTS_TAG);
@@ -150,6 +157,19 @@ export async function buildApp(): Promise<FastifyInstance> {
       reply.header('Cache-Control', 'private, no-store');
     }
     return payload;
+  });
+
+  const rateLimitLoggedAt = new Map<string, number>();
+  await app.register(rateLimit, {
+    global: false,
+    keyGenerator: (req) => requestNetwork(req).address ?? 'unknown',
+    onExceeded: (req) => {
+      const route = req.routeOptions.url ?? "[unmatched]";
+      const now = Date.now();
+      if (now - (rateLimitLoggedAt.get(route) ?? 0) < 60_000) return;
+      rateLimitLoggedAt.set(route, now);
+      req.log.warn({ code: 'PUBLIC_ROUTE_RATE_LIMIT', route }, 'Public API rate limit exceeded');
+    },
   });
 
   await app.register(authPlugin);

@@ -53,7 +53,13 @@ test('advertising delivery, accounting and AdSense replacement in PostgreSQL', a
         payload: { email: address, password: 'QA-Advertising-Only123!', name: 'QA' },
       });
       assert.equal(response.statusCode, 200);
-      await prisma.user.update({ where: { email: address }, data: { emailVerified: true, ...(address === email ? { accountStatus: 'admin' } : { plan: 'hobby' }) } });
+      const user = await prisma.user.update({ where: { email: address }, data: { emailVerified: true, ...(address === email ? { accountStatus: 'admin' } : { plan: 'hobby' }) } });
+      if (address !== email) {
+        await prisma.walletOperation.create({ data: {
+          userId: user.id, requestId: 'ads-qa-service-plan', kind: 'service-plan', plan: 'hobby',
+          sourceCents: 1000, receivedCents: 0, expiresAt: new Date(Date.now() + 3600_000),
+        } });
+      }
       return response.cookies.map(({ name, value }) => name + '=' + value).join('; ');
     };
     const cookie = await register(email);
@@ -70,6 +76,20 @@ test('advertising delivery, accounting and AdSense replacement in PostgreSQL', a
       placement: 'site-banner', state: 'active', priceMinor: 15000, currency: 'RUB', paid: false,
       startsAt: new Date(now.getTime() - 10000).toISOString(), endsAt: new Date(now.getTime() + 3600_000).toISOString(),
     };
+
+    await t.test('the site banner follows the expiry date of the service subscription', async () => {
+      const user = await prisma.user.findUniqueOrThrow({ where: { email: 'reader-qa@example.invalid' } });
+      const where = { userId_requestId: { userId: user.id, requestId: 'ads-qa-service-plan' } };
+      const load = () => app.inject({ method: 'GET', url: placement, headers: { cookie: paidUser } });
+      assert.equal((await load()).json().ad, null);
+      await prisma.walletOperation.update({ where, data: { expiresAt: new Date(Date.now() - 3600_000) } });
+      try {
+        assert.equal((await load()).json().ad?.kind, 'house');
+      } finally {
+        await prisma.walletOperation.update({ where, data: { expiresAt: new Date(Date.now() + 3600_000) } });
+      }
+      assert.equal((await load()).json().ad, null);
+    });
 
     await t.test('admin gates, default house delivery, scheduled paid publication and accounting', async () => {
       assert.equal((await app.inject({ method: 'GET', url: '/api/admin/advertising' })).statusCode, 401);
@@ -93,7 +113,9 @@ test('advertising delivery, accounting and AdSense replacement in PostgreSQL', a
       assert.equal(delivery.json().ad.registrationId, 'QA-123');
       assert.equal(delivery.json().ad.priceMinor, undefined);
       const token = delivery.json().ad.token;
-      const send = (type: string, value = token) => app.inject({ method: 'POST', url: '/api/advertising/event', payload: { token: value, type } });
+      const eventUrl = '/api/advertising/event';
+      const send = (type: string, value = token) => app.inject({ method: 'POST', url: eventUrl, headers: { origin }, payload: { token: value, type } });
+      assert.equal((await app.inject({ method: 'POST', url: eventUrl, payload: { token, type: 'click' } })).statusCode, 403);
       const invalid = token.split('.')[0] + '.' + 'A'.repeat(43);
       assert.equal((await send('click', invalid)).statusCode, 400);
       for (const response of await Promise.all(['click','viewable','impression','click','viewable'].map(type => send(type)))) {
