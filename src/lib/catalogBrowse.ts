@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 
-import { catalogFilters, PAGE_WORDS, type CatalogQuery } from './catalogSearch.js';
+import { catalogFilters, catalogTerm, PAGE_WORDS, type CatalogQuery } from './catalogSearch.js';
 import { expandGenre, flattenGenres } from './genres.js';
 import { prisma } from './prisma.js';
 
@@ -27,13 +27,50 @@ function strings(column: Prisma.Sql) {
   )`;
 }
 
+type SearchTerm = ReturnType<typeof catalogTerm>;
+
+function normalized(value: Prisma.Sql) {
+  return Prisma.sql`btrim(regexp_replace(replace(lower(coalesce(${value}, '')), 'ё', 'е'), '[[:space:]‐‑‒–—―-]+', ' ', 'g'))`;
+}
+
+function containsWords(text: Prisma.Sql, term: SearchTerm) {
+  if (term.words.length === 1) return Prisma.sql`strpos(${text}, ${term.words[0]}) > 0`;
+  return Prisma.sql`NOT EXISTS (
+    SELECT 1 FROM unnest(${term.words}::text[]) AS word(value) WHERE strpos(${text}, value) = 0
+  )`;
+}
+
+function authorNameMatch(term: SearchTerm, name: Prisma.Sql, nickname: Prisma.Sql) {
+  return term.handle
+    ? Prisma.sql`strpos(${normalized(nickname)}, ${term.text}) = 1`
+    : containsWords(normalized(Prisma.sql`concat_ws(' ', ${name}, ${nickname})`), term);
+}
+
+function bookRelevance(term: SearchTerm) {
+  const title = normalized(Prisma.sql`b.name`);
+  const author = Prisma.sql`b."authorName"`;
+  const nickname = Prisma.sql`b.nickname`;
+  if (term.handle) return Prisma.sql`CASE WHEN ${authorNameMatch(term, author, nickname)} THEN 0 END`;
+  const full = normalized(Prisma.sql`concat_ws(' ', b.name, ${author}, ${nickname}, b.description, b.cycle,
+    array_to_string(b.tags, ' '), array_to_string(n."genreNames", ' '))`);
+  return Prisma.sql`CASE
+    WHEN ${title} = ${term.text} THEN 0
+    WHEN strpos(${title}, ${term.text}) = 1 THEN 1
+    WHEN ${containsWords(title, term)} THEN 2
+    WHEN ${authorNameMatch(term, author, nickname)} THEN 3
+    WHEN ${containsWords(full, term)} THEN 4
+  END`;
+}
+
 function searchScope(query: CatalogQuery, now: number) {
   const f = catalogFilters(query, expandGenre, now);
+  const term = catalogTerm(query.q);
+  const author = catalogTerm(query.author);
   const fields: Prisma.Sql[] = [];
   const measured: Prisma.Sql[] = [];
   if (f.allowed) fields.push(Prisma.sql`b.genres && ${[...f.allowed]}::text[]`);
   if (f.statuses.length) fields.push(Prisma.sql`b.status = ANY(${f.statuses}::text[])`);
-  if (f.author) fields.push(Prisma.sql`strpos(lower(b."authorName"), ${f.author}) > 0`);
+  if (author.text) fields.push(authorNameMatch(author, Prisma.sql`b."authorName"`, Prisma.sql`b.nickname`));
   if (f.cycle) fields.push(Prisma.sql`strpos(lower(b.cycle), ${f.cycle}) > 0`);
   const mentions = (part: string) => Prisma.sql`EXISTS (
     SELECT 1 FROM unnest(b.tags || n."genreNames") AS names(value)
@@ -41,10 +78,6 @@ function searchScope(query: CatalogQuery, now: number) {
   )`;
   for (const part of f.tags) fields.push(mentions(part));
   for (const part of f.excluded) fields.push(Prisma.sql`NOT ${mentions(part)}`);
-  if (f.q) {
-    fields.push(Prisma.sql`strpos(lower(concat_ws(' ', b.name, b."authorName", b.description, b.cycle,
-      array_to_string(b.tags, ' '), array_to_string(n."genreNames", ' '))), ${f.q}) > 0`);
-  }
 
   if (f.pages) {
     const pages = Prisma.sql`ceil(greatest(COALESCE(c.words, 0), 0)::numeric / ${PAGE_WORDS})`;
@@ -58,47 +91,75 @@ function searchScope(query: CatalogQuery, now: number) {
     measured.push(Prisma.sql`COALESCE(c."textUpdatedAt", b."updatedAt") >= ${new Date(Math.max(Date.UTC(1_000, 0, 1), f.freshAfter))}`);
   }
 
-  const needsText = Boolean(f.q || f.author || f.cycle || f.allowed || f.statuses.length || f.tags.length || f.excluded.length);
+  const needsText = Boolean(term.text || author.text || f.cycle || f.allowed || f.statuses.length || f.tags.length || f.excluded.length);
   return {
     measured,
+    term,
     candidates: needsText ? Prisma.sql`
-      SELECT b.id, b."ownerId", b."authorName", b."createdAt", b."updatedAt" FROM (
-        SELECT v.*,
-          CASE WHEN jsonb_typeof(v.settings #> '{catalog,cycle}') = 'string'
-            THEN v.settings #>> '{catalog,cycle}' ELSE '' END AS cycle,
-          CASE WHEN v.settings #>> '{catalog,status}' IN ('complete', 'frozen')
-            THEN v.settings #>> '{catalog,status}' ELSE 'writing' END AS status,
-          ${strings(Prisma.sql`v.settings #> '{catalog,tags}'`)} AS tags,
-          ${strings(Prisma.sql`v.settings #> '{catalog,genres}'`)} AS genres
-        FROM visible_books v
-      ) b
-      CROSS JOIN LATERAL (
-        SELECT ARRAY(SELECT COALESCE(${GENRE_NAMES}::jsonb ->> id, id) FROM unnest(b.genres) AS genre(id)) AS "genreNames"
-      ) n
-      WHERE true ${and(fields)}
-    ` : Prisma.sql`SELECT id, "ownerId", "authorName", "createdAt", "updatedAt" FROM visible_books`,
+      SELECT matched.* FROM (
+        SELECT b.id, b."ownerId", b."authorName", b."createdAt", b."updatedAt",
+               ${term.text ? bookRelevance(term) : Prisma.sql`0`} AS relevance
+        FROM (
+          SELECT v.*,
+            CASE WHEN jsonb_typeof(v.settings #> '{catalog,cycle}') = 'string'
+              THEN v.settings #>> '{catalog,cycle}' ELSE '' END AS cycle,
+            CASE WHEN v.settings #>> '{catalog,status}' IN ('complete', 'frozen')
+              THEN v.settings #>> '{catalog,status}' ELSE 'writing' END AS status,
+            ${strings(Prisma.sql`v.settings #> '{catalog,tags}'`)} AS tags,
+            ${strings(Prisma.sql`v.settings #> '{catalog,genres}'`)} AS genres
+          FROM visible_books v
+        ) b
+        CROSS JOIN LATERAL (
+          SELECT ARRAY(SELECT COALESCE(${GENRE_NAMES}::jsonb ->> id, id) FROM unnest(b.genres) AS genre(id)) AS "genreNames"
+        ) n
+        WHERE true ${and(fields)}
+      ) matched
+      WHERE matched.relevance IS NOT NULL
+    ` : Prisma.sql`SELECT id, "ownerId", "authorName", "createdAt", "updatedAt", 0 AS relevance FROM visible_books`,
   };
 }
 
-function browse(scope: CatalogVisibility, now: number, query: CatalogQuery = {}) {
-  const filters = searchScope(query, now);
+function visibleBooks(scope: CatalogVisibility) {
+  return Prisma.sql`
+    SELECT p.id, p."ownerId", p.name, p.description, p.settings,
+           COALESCE(NULLIF(btrim(u.name), ''), 'Автор') AS "authorName",
+           CASE WHEN length(u.image) <= 2048 AND u.image !~* '^data:' THEN u.image END AS image,
+           bp.nickname,
+           p."createdAt", p."updatedAt"
+    FROM projects p JOIN users u ON u.id = p."ownerId"
+    LEFT JOIN blog_profiles bp ON bp."authorId" = u.id
+    WHERE ${visible} AND NOT (p.id = ANY(${scope.excludedBooks}::text[]))
+      AND NOT (p."ownerId" = ANY(${scope.excludedAuthors}::text[]))
+  `;
+}
+
+const sources = {
+  candidates: Prisma.sql`candidates`,
+  chapters: Prisma.sql`chapters_counted`,
+  ranked: Prisma.sql`ranked`,
+};
+
+function browse(
+  scope: CatalogVisibility,
+  now: number,
+  filters = searchScope({}, now),
+  level: keyof typeof sources = 'ranked',
+) {
   return Prisma.sql`
     WITH visible_books AS (
-      SELECT p.id, p."ownerId", p.name, COALESCE(p.description, '') AS description, p.settings,
-             COALESCE(NULLIF(btrim(u.name), ''), 'Автор') AS "authorName", p."createdAt", p."updatedAt"
-      FROM projects p JOIN users u ON u.id = p."ownerId"
-      WHERE ${visible} AND NOT (p.id = ANY(${scope.excludedBooks}::text[]))
-        AND NOT (p."ownerId" = ANY(${scope.excludedAuthors}::text[]))
+      ${visibleBooks(scope)}
     ), candidates AS (
       ${filters.candidates}
-    ), chapters_counted AS MATERIALIZED (
+    )
+    ${level === 'candidates' ? Prisma.empty : Prisma.sql`, chapters_counted AS MATERIALIZED (
       SELECT b.*, COALESCE(c.words, 0)::int AS words, COALESCE(c."textUpdatedAt", b."updatedAt") AS "textUpdatedAt"
       FROM candidates b LEFT JOIN LATERAL (
         SELECT SUM(c."wordCount") AS words, MAX(c."updatedAt") AS "textUpdatedAt"
         FROM chapters c WHERE c."projectId" = b.id AND COALESCE(c.metadata->>'public', '') <> 'false'
       ) c ON true
       WHERE true ${and(filters.measured)}
-    ), ranked AS MATERIALIZED (
+    )`}
+    ${level === 'ranked' ? Prisma.sql`, ranked AS MATERIALIZED (
       SELECT b.*, v.views, r.likes, r.favorites, r."readingNow", COALESCE(mine.favorite, false) AS "myFavorite"
       FROM chapters_counted b
       LEFT JOIN LATERAL (
@@ -111,7 +172,7 @@ function browse(scope: CatalogVisibility, now: number, query: CatalogQuery = {})
         FROM book_reactions WHERE "projectId" = b.id
       ) r ON true
       LEFT JOIN book_reactions mine ON mine."projectId" = b.id AND mine."userId" = ${scope.userId}
-    )
+    )` : Prisma.empty}
   `;
 }
 
@@ -125,13 +186,55 @@ const SEARCH_ORDER: Record<string, Prisma.Sql> = {
 const POPULAR_ORDER = Prisma.sql`views DESC, likes DESC, words DESC`;
 
 export async function searchCatalog(scope: CatalogVisibility, query: CatalogQuery, page: number, now: number) {
-  const order = Object.hasOwn(SEARCH_ORDER, query.sort ?? '') ? SEARCH_ORDER[query.sort!]! : POPULAR_ORDER;
+  const filters = searchScope(query, now);
+  const sort = query.sort || (filters.term.text ? 'relevance' : 'popular');
+  const relevance = sort === 'relevance' && Boolean(filters.term.text);
+  const order = relevance ? Prisma.sql`relevance, "createdAt" DESC`
+    : Object.hasOwn(SEARCH_ORDER, sort) ? SEARCH_ORDER[sort]! : POPULAR_ORDER;
+  const level = relevance || sort === 'new'
+    ? (filters.measured.length ? 'chapters' : 'candidates')
+    : sort === 'updated' || sort === 'words' ? 'chapters' : 'ranked';
+  const source = sources[level];
   const [row] = await prisma.$queryRaw<Array<{ ids: string[]; total: number }>>`
-    ${browse(scope, now, query)}
-    SELECT (SELECT count(*)::int FROM chapters_counted) AS total,
-      ARRAY(SELECT id FROM ranked ORDER BY ${order}, id LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}) AS ids
+    ${browse(scope, now, filters, level)}
+    SELECT (SELECT count(*)::int FROM ${source}) AS total,
+      ARRAY(SELECT id FROM ${source} ORDER BY ${order}, id LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}) AS ids
   `;
   return { ids: row!.ids, total: row!.total, page, pageSize: PAGE_SIZE };
+}
+
+type Writer = { id: string; name: string; nickname: string | null; image: string | null; books: number };
+const AUTHORS_PER_PAGE = 24;
+
+export async function searchAuthors(scope: CatalogVisibility, query: string, page: number) {
+  const term = catalogTerm(query);
+  const name = Prisma.sql`b."authorName"`;
+  const nickname = Prisma.sql`b.nickname`;
+  const where = term.text ? Prisma.sql`WHERE ${authorNameMatch(term, name, nickname)}` : Prisma.empty;
+  const rank = term.text ? Prisma.sql`CASE
+    WHEN ${normalized(name)} = ${term.text} OR ${normalized(nickname)} = ${term.text} THEN 0
+    WHEN strpos(${normalized(name)}, ${term.text}) = 1 OR strpos(${normalized(nickname)}, ${term.text}) = 1 THEN 1
+    ELSE 2 END` : Prisma.sql`0`;
+
+  const [row] = await prisma.$queryRaw<Array<{ authors: Writer[]; total: number }>>`
+    WITH visible_books AS (
+      ${visibleBooks(scope)}
+    ), authors AS MATERIALIZED (
+      SELECT b."ownerId" AS id, ${name} AS name, b.nickname, b.image, count(*)::int AS books,
+             ${rank} AS relevance
+      FROM visible_books b
+      ${where}
+      GROUP BY b."ownerId", b."authorName", b.nickname, b.image
+    )
+    SELECT (SELECT count(*)::int FROM authors) AS total,
+      COALESCE((
+        SELECT jsonb_agg(to_jsonb(a) - 'relevance' ORDER BY relevance, lower(name), id) FROM (
+          SELECT * FROM authors ORDER BY relevance, lower(name), id
+          LIMIT ${AUTHORS_PER_PAGE} OFFSET ${(page - 1) * AUTHORS_PER_PAGE}
+        ) a
+      ), '[]'::jsonb) AS authors
+  `;
+  return { ...row!, page, pageSize: AUTHORS_PER_PAGE };
 }
 
 export type HomeShelf = 'popular' | 'hot' | 'updates' | 'bestsellers' | 'arrivals' | 'reading' | 'liked' | 'favorites';

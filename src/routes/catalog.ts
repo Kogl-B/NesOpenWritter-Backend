@@ -12,7 +12,7 @@ import { countryBlocks, denyCatalogGeo, denyGeo } from '../lib/geo/request.js';
 import { bookDigestKey, bookSubscriptionNotice, commentNotices, digestDay, readerReportNotice } from '../lib/notify/drafts.js';
 import { writeDigest, writeNotices } from '../lib/notify/deliver.js';
 import { coverHref } from '../lib/ai/place.js';
-import { homeCatalog, searchCatalog, topCatalog, type CatalogVisibility, type HomeShelf } from '../lib/catalogBrowse.js';
+import { homeCatalog, searchAuthors, searchCatalog, topCatalog, type CatalogVisibility, type HomeShelf } from '../lib/catalogBrowse.js';
 import { viewerBlocks } from '../lib/viewerBlocks.js';
 import { readerAccessOf } from '../lib/readerAccess.js';
 import { cachedReaderPages, pageHeight, PAGE_WIDTH, readerPages, renderReaderPage } from '../lib/protectedReader.js';
@@ -87,9 +87,10 @@ function metaOf(settings: unknown) {
   };
 }
 
-async function loadBooks(userId: string | null, selectedIds?: string[]): Promise<BookCard[]> {
+async function loadBooks(userId: string | null, selectedIds?: string[], ownerId?: string): Promise<BookCard[]> {
   if (selectedIds?.length === 0) return [];
   const scope = selectedIds ? Prisma.sql`AND p.id = ANY(${selectedIds}::text[])` : Prisma.empty;
+  const owner = ownerId ? Prisma.sql`AND p."ownerId" = ${ownerId}` : Prisma.empty;
   const rows = await prisma.$queryRaw<RawBook[]>`
     SELECT p.id, p.name, p.description, p.settings, p."ownerId",
            u.name AS "authorName", p."createdAt", p."updatedAt",
@@ -100,7 +101,7 @@ async function loadBooks(userId: string | null, selectedIds?: string[]): Promise
     JOIN users u ON u.id = p."ownerId"
     LEFT JOIN chapters c ON c."projectId" = p.id
       AND COALESCE(c.metadata->>'public', '') <> 'false'
-    WHERE COALESCE(p.settings #>> '{catalog,published}', '') = 'true' ${scope}
+    WHERE COALESCE(p.settings #>> '{catalog,published}', '') = 'true' ${scope} ${owner}
     GROUP BY p.id, u.name
   `;
   if (rows.length === 0) return [];
@@ -165,11 +166,13 @@ async function loadBooks(userId: string | null, selectedIds?: string[]): Promise
 }
 
 const shortQuery = z.string().max(512).optional();
+const pageQuery = z.coerce.number().int().min(1).max(10_000).default(1);
+const authorSearchQuery = z.object({ q: shortQuery, page: pageQuery });
 const catalogSearchQuery = z.object({
   q: shortQuery, genre: shortQuery, status: shortQuery, author: shortQuery, tag: shortQuery,
   excludeTag: shortQuery, cycle: shortQuery, sort: shortQuery, minWords: shortQuery, maxWords: shortQuery,
   minPages: shortQuery, maxPages: shortQuery, size: shortQuery, updatedDays: shortQuery,
-  page: z.coerce.number().int().min(1).max(10_000).default(1),
+  page: pageQuery,
 });
 
 async function catalogVisibility(req: FastifyRequest): Promise<CatalogVisibility> {
@@ -333,14 +336,17 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     });
     if (!author) return reply.status(404).send({ error: 'Автор не найден' });
     const viewerId = req.user?.id ?? null;
-    const geo = await countryBlocks(req);
-    const [mineRaw, authoredRaw] = await Promise.all([
-      loadBooks(author.id),
-      loadBooks(viewerId),
+    const [geo, authoredRaw, libraryRows] = await Promise.all([
+      countryBlocks(req),
+      loadBooks(viewerId, undefined, author.id),
+      prisma.bookReaction.findMany({
+        where: { userId: author.id, OR: [{ favorite: true }, { shelf: { not: '' } }] },
+        select: { projectId: true },
+      }),
     ]);
     const keepBook = (book: BookCard) => !bookBlocked(geo.index, geo.country, book.id);
-    const mine = mineRaw.filter(keepBook);
-    const books = authoredRaw.filter((book) => book.authorId === author.id && keepBook(book));
+    const mine = (await loadBooks(author.id, libraryRows.map(row => row.projectId))).filter(keepBook);
+    const books = authoredRaw.filter(keepBook);
     const ids = new Set(books.map((book) => book.id));
     const blocks = await viewerBlocks(viewerId);
     const [posts, comments, followers, following] = await Promise.all([
@@ -474,6 +480,12 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     const { ids, ...result } = await searchCatalog(scope, query, page, Date.now());
     const cards = await catalogCards(scope.userId, ids);
     return { ...result, books: orderedCards(ids, cards) };
+  });
+
+  app.get('/api/catalog/search/authors', { config: { rateLimit: { max: 60 } } }, async (req, reply) => {
+    reply.header('Cache-Control', 'private, no-store');
+    const { q = '', page } = authorSearchQuery.parse(req.query);
+    return searchAuthors(await catalogVisibility(req), q, page);
   });
 
   app.get('/api/catalog/tops', { config: { rateLimit: { max: 90 } } }, async (req, reply) => {

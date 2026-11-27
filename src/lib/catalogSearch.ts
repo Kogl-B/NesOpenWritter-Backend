@@ -70,6 +70,16 @@ function mentions(book: SearchableBook, part: string): boolean {
   return [...book.tags, ...book.genreNames].some((item) => item.toLowerCase().includes(part));
 }
 
+export function normalizeCatalogText(value: string): string {
+  return value.toLowerCase().replaceAll('ё', 'е').replace(/[\s‐‑‒–—―-]+/g, ' ').trim();
+}
+
+export function catalogTerm(value = '') {
+  const handle = value.trimStart().startsWith('@');
+  const text = normalizeCatalogText(handle ? value.trimStart().slice(1) : value);
+  return { handle, text, words: [...new Set(text.split(' ').filter(Boolean))] };
+}
+
 export function catalogFilters(
   query: CatalogQuery,
   expandGenre: (id: string) => string[],

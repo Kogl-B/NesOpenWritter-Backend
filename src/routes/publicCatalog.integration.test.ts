@@ -93,7 +93,7 @@ test('public catalog, request identity and quotas on isolated PostgreSQL', async
           assert.equal(reply.headers['cache-control'], 'private, no-store');
           // For tied scores the SQL uses stable IDs, so compare against the full
           // candidate set and assert exact ordering on the distinct default ranking.
-          if (!filters.sort) assert.deepEqual(ids(actual.books), ids(expected.slice((page - 1) * 48, page * 48)));
+          if (!filters.sort && !filters.q) assert.deepEqual(ids(actual.books), ids(expected.slice((page - 1) * 48, page * 48)));
           else assert.deepEqual(ids(actual.books).sort(), ids(expected.slice((page - 1) * 48, page * 48)).sort());
         }
       }
@@ -111,6 +111,53 @@ test('public catalog, request identity and quotas on isolated PostgreSQL', async
       assert.equal(tops.json().byViews.length, 30);
       assert.deepEqual(ids(tops.json().byViews), ids([...allPublished].sort((a, b) => b.views - a.views).slice(0, 30)));
       assert.equal(tops.json().authors.reduce((sum: number, a: { books: number }) => sum + a.books, 0), allPublished.length);
+    });
+
+    await t.test('title relevance, reader-facing author search, and hidden publications', async () => {
+      await prisma.blogProfile.create({ data: { authorId: author.id, nickname: 'ветрова_перо' } });
+      await prisma.blogProfile.create({ data: { authorId: hiddenAuthor.id, nickname: 'скрытый-автор' } });
+      const [exact, prefix, description] = await Promise.all([
+        prisma.project.create({ data: { ownerId: author.id, name: 'Ёлка — Север', settings: { catalog: { published: true } } } }),
+        prisma.project.create({ data: { ownerId: author.id, name: 'Ёлка Север и ночь', settings: { catalog: { published: true } } } }),
+        prisma.project.create({ data: { ownerId: author.id, name: 'Другая книга', description: 'Лишь в описании: Ёлка Север', settings: { catalog: { published: true } } } }),
+      ]);
+      await prisma.bookView.createMany({ data: Array.from({ length: 25 }, () => ({ projectId: description.id })) });
+      const get = async (path: string, query: Record<string, string>, authenticated = false) => {
+        const result = await app.inject({ url: '/api/catalog/search' + path + '?' + new URLSearchParams(query),
+          headers: authenticated ? { ...headers, cookie } : headers });
+        assert.equal(result.statusCode, 200, result.body.slice(0, 350));
+        assert.equal(result.headers['cache-control'], 'private, no-store');
+        return result.json();
+      };
+
+      const relevant = await get('', { q: '  ЕЛКА   СЕВЕР  ' });
+      assert.deepEqual(ids(relevant.books), [exact.id, prefix.id, description.id]);
+      const reordered = await get('', { q: 'север елка' });
+      assert.deepEqual(ids(reordered.books).slice(0, 2).sort(), [exact.id, prefix.id].sort());
+      const explicitlyPopular = await get('', { q: 'елка север', sort: 'popular' });
+      assert.equal(explicitlyPopular.books[0].id, description.id);
+      const allWrittenByHandle = await get('', { q: '@ВЕТРОВА_ПЕРО' }, true);
+      assert.ok(allWrittenByHandle.books.length > 0);
+      assert.ok(allWrittenByHandle.books.every((book: { authorId: string }) => book.authorId === author.id));
+
+      const publicAuthor = await get('/authors', { q: 'ветрова анна' }, true);
+      const byNickname = await get('/authors', { q: '@ветрова_перо' }, true);
+      assert.deepEqual(publicAuthor.authors, byNickname.authors);
+      assert.deepEqual(publicAuthor.authors, [{
+        id: author.id, name: author.name, nickname: 'ветрова_перо', image: null,
+        books: visibleToReader.length + 3,
+      }]);
+      assert.equal((await get('/authors', { q: '@скрытый-автор' }, true)).total, 0);
+      assert.equal((await get('/authors', { q: '@скрытый-автор' })).total, 1);
+      assert.equal((await get('/authors', { q: 'Читатель' })).total, 0);
+      const emptyPage = await get('/authors', { q: 'ветрова', page: '2' });
+      assert.equal(emptyPage.total, 1);
+      assert.deepEqual(emptyPage.authors, []);
+
+      const profile = await app.inject({ url: '/api/catalog/authors/' + author.id, headers: { ...headers, cookie } });
+      assert.equal(profile.statusCode, 200, profile.body.slice(0, 350));
+      assert.equal(profile.json().author.books, publicAuthor.authors[0].books);
+      assert.ok(profile.json().books.every((book: { authorId: string }) => book.authorId === author.id));
     });
 
     await t.test('client identity comes from the verified provider or the connected peer', () => {
