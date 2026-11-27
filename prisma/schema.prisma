@@ -31,6 +31,8 @@ model User {
   accountStatus    String                @default("test")
   /// Баланс на будущие ИИ-продукты, центы USD
   aiBalanceCents   Int                   @default(0)
+  walletBalanceCents BigInt               @default(0)
+  rubBalanceCents    BigInt               @default(0)
   createdAt        DateTime              @default(now())
   updatedAt        DateTime              @updatedAt
 
@@ -42,6 +44,7 @@ model User {
   dictionaryEntries DictionaryEntry[]
   cryptoPayments CryptoPayment[]
   blogPosts    BlogPost[]
+  blogProfile  BlogProfile?
   authorLevels AuthorLevel[]
   followsOut   AuthorFollow[] @relation("Follower")
   followsIn    AuthorFollow[] @relation("AuthorFollowed")
@@ -51,18 +54,37 @@ model User {
   blogLikes    BlogLike[]
   blogReports  BlogReport[]
   blogDonations BlogDonation[]
+  blogModerations BlogModerator[]
   aiUsages     AiUsage[]
   errorReports AppErrorReport[]
   readProgress ReadProgress[]
   bookSubscriptions BookSubscription[]
   chapterRevisions ChapterRevision[]
   publishAccounts  PublishAccount[]
+  publishVaults    PublishVault[]
   publishLinks     PublishLink[]
   publishDeliveries PublishDelivery[]
   readerNotices    ReaderNotice[]
   notifications    Notification[]
+  storedFiles      StoredFile[]
+  aiJobs           AiJob[]
+  photoShares      PhotoShare[]  @relation("PhotoOwner")
+  photoViews       PhotoViewer[] @relation("PhotoViewer")
 
   @@map("users")
+}
+
+model BlogProfile {
+  authorId             String @id
+  nickname             String? @unique
+  title                String @default("")
+  description          String @default("")
+  defaultAudience      String @default("all")
+  defaultCommentAccess String @default("all")
+
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@map("blog_profiles")
 }
 
 model AuthorLevel {
@@ -73,6 +95,7 @@ model AuthorLevel {
   /// Цена в рублях за месяц
   priceRub    Int
   avatar      String   @default("")
+  available   Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -103,6 +126,8 @@ model AuthorSubscription {
   authorId  String
   levelId   String
   createdAt DateTime @default(now())
+  expiresAt DateTime?
+  cancelledAt DateTime?
 
   user   User        @relation("Subscriber", fields: [userId], references: [id], onDelete: Cascade)
   author User        @relation("SubscribedAuthor", fields: [authorId], references: [id], onDelete: Cascade)
@@ -113,6 +138,36 @@ model AuthorSubscription {
   @@map("author_subscriptions")
 }
 
+/// История доступа и зачислений. Сумма в копейках BYN и название уровня фиксируются при операции.
+model BlogAudienceEvent {
+  id          String    @id @default(cuid())
+  authorId    String
+  userId      String
+  kind        String
+  requestId   String?
+  levelId     String?
+  levelTitle  String    @default("")
+  priceRub    Int       @default(0)
+  amountCents Int       @default(0)
+  reason      String    @default("")
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@unique([userId, requestId])
+  @@index([authorId, createdAt])
+  @@map("blog_audience_events")
+}
+
+model BlogTrafficDay {
+  authorId String
+  day      String
+  source   String
+  views    Int @default(0)
+
+  @@id([authorId, day, source])
+  @@map("blog_traffic_days")
+}
+
 model BlogPost {
   id        String   @id @default(cuid())
   authorId  String
@@ -120,23 +175,45 @@ model BlogPost {
   body      String
   topic     String   @default("")
   tags      String[] @default([])
+  attachment Json?
   views     Int      @default(0)
   published Boolean  @default(false)
+  publishedAt DateTime?
   /// Уровень подписки, без которого текст закрыт. Пусто — запись для всех.
   levelId   String?
+  /// all | subscribers | level | self
+  audience  String   @default("all")
+  /// all | subscribers | none
+  commentAccess String @default("all")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   author    User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
   level     AuthorLevel?  @relation(fields: [levelId], references: [id], onDelete: SetNull)
   comments  BlogComment[]
+  moderators BlogModerator[]
   likes     BlogLike[]
   reports   BlogReport[]
   donations BlogDonation[]
+  readers   BlogPostReader[]
 
   @@index([authorId, updatedAt])
   @@index([published, createdAt])
+  @@index([published, publishedAt])
   @@map("blog_posts")
+}
+
+model BlogModerator {
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  post BlogPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@index([userId])
+  @@map("blog_moderators")
 }
 
 model BlogComment {
@@ -151,14 +228,30 @@ model BlogComment {
 
   post BlogPost @relation(fields: [postId], references: [id], onDelete: Cascade)
   user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  files BlogCommentFile[]
 
   @@index([postId, createdAt])
   @@map("blog_comments")
 }
 
+model BlogCommentFile {
+  id        String @id @default(cuid())
+  commentId String
+  position  Int    @default(0)
+  name      String
+  size      Int
+  data      Bytes
+
+  comment BlogComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, position])
+  @@map("blog_comment_files")
+}
+
 model BlogLike {
   userId    String
   postId    String
+  emoji     String   @default("heart")
   createdAt DateTime @default(now())
 
   user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -171,15 +264,20 @@ model BlogLike {
 
 model BlogReport {
   id        String   @id @default(cuid())
-  postId    String
+  postId    String?
+  postTitle String   @default("")
   userId    String
   note      String   @default("")
+  kind      String   @default("complaint")
+  status    String   @default("new")
   createdAt DateTime @default(now())
 
-  post BlogPost @relation(fields: [postId], references: [id], onDelete: Cascade)
-  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post BlogPost? @relation(fields: [postId], references: [id], onDelete: SetNull)
+  user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([postId])
+  @@index([createdAt, id])
+  @@index([kind, status, createdAt])
   @@map("blog_reports")
 }
 
@@ -198,6 +296,56 @@ model BlogDonation {
   @@map("blog_donations")
 }
 
+model BlogPostReader {
+  postId          String
+  readerKey       String
+  subscriberViews Int @default(0)
+  otherViews      Int @default(0)
+
+  post BlogPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@id([postId, readerKey])
+  @@map("blog_post_readers")
+}
+
+/// Журнал переводов сохраняется при удалении публикации.
+model BlogWalletDonation {
+  id          String   @id @default(cuid())
+  requestId   String
+  senderId    String
+  authorId    String
+  postId      String
+  postTitle   String
+  amountCents Int
+  note        String
+  createdAt   DateTime @default(now())
+
+  @@unique([senderId, requestId])
+  @@index([authorId])
+  @@index([authorId, createdAt])
+  @@map("blog_wallet_donations")
+}
+
+/// Квитанции за сервисные тарифы и конвертацию между кошельками.
+model WalletOperation {
+  userId        String
+  requestId     String
+  kind          String
+  sourceCents   Int
+  receivedCents Int
+  rateUnits     Int?
+  fromCurrency  String?
+  toCurrency    String?
+  exchangeQuote Json?
+  plan          String?
+  expiresAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  @@id([userId, requestId])
+  @@index([userId, kind, plan, expiresAt])
+  @@map("wallet_operations")
+}
+
 /// Счёт NOWPayments. Создаётся только когда криптооплата включена.
 model CryptoPayment {
   id             String    @id @default(cuid())
@@ -208,6 +356,7 @@ model CryptoPayment {
   status         String    @default("pending")
   providerId       String?
   invoiceUrl       String?
+  priceQuote       Json?
   /// Сколько центов USD уже зачислено. Частичная оплата меньше суммы счёта.
   creditedUsdCents Int       @default(0)
   creditedAt       DateTime?
@@ -246,6 +395,8 @@ model TwoFactor {
   secret      String
   backupCodes String
   verified    Boolean @default(false)
+  failedVerificationCount Int @default(0)
+  lockedUntil DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -343,9 +494,61 @@ model Project {
   bookSubscriptions   BookSubscription[]
   readerNotices       ReaderNotice[]
   publishLinks        PublishLink[]
+  storedFiles         StoredFile[]
 
   @@index([ownerId])
   @@map("projects")
+}
+
+/// Файл в хранилище кабинета. Размер входит в занятое место тарифа.
+model StoredFile {
+  id        String   @id @default(cuid())
+  userId    String
+  projectId String?
+  key       String   @unique
+  sizeBytes Int
+  kind      String   @default("other")
+  createdAt DateTime @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@map("stored_files")
+}
+
+/// Кто может открыть кадр из «Моих фото» и по прямой ссылке.
+model PhotoShare {
+  id         String   @id @default(cuid())
+  userId     String
+  hrefHash   String
+  href       String
+  title      String   @default("")
+  /// private | link | people | public
+  visibility String   @default("private")
+  token      String   @unique
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  owner   User          @relation("PhotoOwner", fields: [userId], references: [id], onDelete: Cascade)
+  viewers PhotoViewer[]
+
+  @@unique([userId, hrefHash])
+  @@index([userId])
+  @@map("photo_shares")
+}
+
+model PhotoViewer {
+  photoId   String
+  viewerId  String
+  createdAt DateTime @default(now())
+
+  photo  PhotoShare @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  viewer User       @relation("PhotoViewer", fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@id([photoId, viewerId])
+  @@index([viewerId])
+  @@map("photo_viewers")
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +787,7 @@ model TimelineEvent {
   positions      CharacterPosition[]
   chapters       Chapter[]
   KnowledgeEntry KnowledgeEntry[]
+  manuscriptSources TimelineReview[]
 
   @@index([projectId])
   @@index([locationId])
@@ -676,6 +880,7 @@ model Chapter {
   children  Chapter[]         @relation("ChapterTree")
   event     TimelineEvent?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
   revisions ChapterRevision[]
+  timelineJobs AiJob[]
   mentions  SceneMention[]
   ledger    CharacterLedger[]
   reads     ReadProgress[]
@@ -1182,6 +1387,53 @@ model AiUsage {
   @@map("ai_usages")
 }
 
+/// Генерация, которую доводит сервер. Закрытая вкладка не отменяет уже принятую задачу.
+model AiJob {
+  id         String    @id @default(cuid())
+  userId     String
+  projectId  String    @default("")
+  /// image | text | cover | timeline
+  kind       String
+  /// queued | running | done | failed
+  status     String    @default("queued")
+  request    Json
+  result     Json?
+  error      String    @default("")
+  createdAt  DateTime  @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  timelineChapterId String?
+  timelineKey       String? @unique
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  timelineChapter Chapter? @relation(fields: [timelineChapterId], references: [id], onDelete: Cascade)
+  timelineReviews TimelineReview[]
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@index([timelineChapterId, createdAt])
+  @@map("ai_jobs")
+}
+
+/// Решение автора по предложению ИИ. Принятая запись связывает сюжетное
+/// событие с конкретным фрагментом сохранённой версии сцены.
+model TimelineReview {
+  jobId         String
+  proposalIndex Int
+  eventId       String?
+  disposition   String
+  quote         String
+  createdAt     DateTime @default(now())
+
+  job   AiJob          @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  event TimelineEvent? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@id([jobId, proposalIndex])
+  @@index([eventId])
+  @@map("timeline_reviews")
+}
+
 /// Сообщение об ошибке, которое пользователь отправил из шапки.
 model AppErrorReport {
   id        String   @id @default(cuid())
@@ -1277,11 +1529,28 @@ model PublishAccount {
   @@map("publish_accounts")
 }
 
+/// Логин и пароль площадки. Шифр v1 открывается только в браузере. Шифр сервера нужен, чтобы взять новый токен.
+model PublishVault {
+  id           String   @id @default(cuid())
+  userId       String
+  platform     String
+  loginSeal    String
+  passwordSeal String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, platform])
+  @@index([userId])
+  @@map("publish_vaults")
+}
+
 /// Проект площадки и книга на сайте. Одна связь для Sponsr и будущих книг других сайтов.
 model PublishLink {
   id          String   @id @default(cuid())
   userId      String
-  /// sponsr | boosty | patreon | author_today | litnet | wattpad | ficbook | ao3
+  /// sponsr | boosty | patreon | author_today | litnet | wattpad | ficbook | rulate
   platform    String
   remoteId    String
   remoteTitle String   @default("")
@@ -1304,7 +1573,7 @@ model PublishDelivery {
   userId    String
   chapterId String
   projectId String
-  /// site | sponsr | vk | telegram | discord | boosty | patreon | author_today | litnet | wattpad | ficbook | ao3
+  /// site | sponsr | vk | telegram | discord | boosty | patreon | author_today | litnet | wattpad | ficbook | rulate
   platform  String
   /// ok | error
   status    String
@@ -1345,7 +1614,7 @@ model ReaderNotice {
 model Notification {
   id        String    @id @default(cuid())
   userId    String
-  /// chapter | book_comment | comment_reply | blog_post | blog_comment | reader_report
+  /// chapter | book_comment | comment_reply | blog_post | blog_comment | reader_report | publish_error | book_subscription | follow | blog_donation | blog_report | book_status | digest
   kind      String
   title     String
   body      String    @default("")

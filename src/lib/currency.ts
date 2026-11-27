@@ -1,13 +1,5 @@
 import { logger } from './logger.js';
-
-
-
-/**
- * Курсы валют НБ РБ (https://api.nbrb.by/exrates). Базовая валюта цен — BYN,
- * USD и RUB пересчитываются. Обновление — один раз в сутки после 12:00
- * по минскому времени: «дневной якорь» = дата последнего наступившего 12:00;
- * пока якорь не сменился, кэш валиден и API не дёргается.
- */
+import { currencyRefreshSlot, scheduleCurrencyRefresh } from './currencyRefresh.js';
 
 export interface RateInfo {
   code: string;
@@ -22,7 +14,7 @@ export interface RatesBundle {
   USD: RateInfo;
   RUB: RateInfo;
   fetchedAt: string;
-  /** Дата последнего наступившего 12:00 по Минску, к которому относится кэш. */
+  /** Начало текущего шестичасового интервала обновления. */
   anchor: string;
   /** true — НБ РБ был недоступен, отдаём последние известные курсы. */
   stale: boolean;
@@ -33,25 +25,12 @@ export interface RatesBundle {
 const NBRB_URL = 'https://api.nbrb.by/exrates/rates?periodicity=0';
 const FETCH_TIMEOUT_MS = 8000;
 const STALE_RETRY_MS = 10 * 60 * 1000;
-const WARMUP_INTERVAL_MS = 60 * 60 * 1000;
 
 const FALLBACK_USD = { rate: 3.0637, scale: 1 };
 const FALLBACK_RUB = { rate: 3.5893, scale: 100 };
 
 let cache: RatesBundle | null = null;
 let inflight: Promise<RatesBundle> | null = null;
-
-/** Сейчас по Минску (UTC+3, без перехода на летнее время). */
-function minskNow(): Date {
-  return new Date(Date.now() + 3 * 3600 * 1000);
-}
-
-/** Дата последнего наступившего 12:00 по Минску. */
-function currentAnchor(): string {
-  const m = minskNow();
-  if (m.getUTCHours() < 12) m.setUTCDate(m.getUTCDate() - 1);
-  return m.toISOString().slice(0, 10);
-}
 
 interface NbrbRow {
   Cur_Abbreviation: string;
@@ -82,15 +61,13 @@ async function fetchNbRb(): Promise<{ USD: RateInfo; RUB: RateInfo } | null> {
 }
 
 export async function getRates(): Promise<RatesBundle> {
-  const anchor = currentAnchor();
   const now = Date.now();
-  if (
-    cache &&
-    (cache.anchor === anchor || (cache.stale && now < cache.retryAfter))
-  ) {
-    return cache;
+  const anchor = new Date(currencyRefreshSlot(now)).toISOString();
+  if (cache?.anchor === anchor && (!cache.stale || now < cache.retryAfter)) return cache;
+  if (inflight) {
+    const previous = await inflight;
+    return previous.anchor === anchor ? previous : getRates();
   }
-  if (inflight) return inflight;
 
   inflight = (async () => {
     const fetched = await fetchNbRb();
@@ -135,9 +112,4 @@ export function bynPerUnit(r: RateInfo): number {
   return r.rate / r.scale;
 }
 
-// Часовой прогрев: курс обновляется в первый тик после 12:00 по Минску
-// даже если никто не открывает кабинет
-const warmup = setInterval(() => {
-  void getRates().catch(() => undefined);
-}, WARMUP_INTERVAL_MS);
-warmup.unref?.();
+scheduleCurrencyRefresh(getRates);

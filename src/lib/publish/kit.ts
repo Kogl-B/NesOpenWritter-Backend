@@ -1,6 +1,6 @@
 import { chapterBlocks, excerpt } from './text.js';
 
-export const KIT_PLATFORMS = ['boosty', 'patreon', 'author_today', 'litnet', 'wattpad', 'ficbook', 'ao3'] as const;
+export const KIT_PLATFORMS = ['boosty', 'patreon', 'author_today', 'litnet', 'wattpad', 'ficbook', 'rulate'] as const;
 export type KitPlatform = (typeof KIT_PLATFORMS)[number];
 
 const ROOT: Record<KitPlatform, string> = {
@@ -10,7 +10,7 @@ const ROOT: Record<KitPlatform, string> = {
   litnet: 'litnet.com',
   wattpad: 'wattpad.com',
   ficbook: 'ficbook.net',
-  ao3: 'archiveofourown.org',
+  rulate: 'rulate.ru',
 };
 
 const HOME: Record<KitPlatform, string> = {
@@ -20,7 +20,7 @@ const HOME: Record<KitPlatform, string> = {
   litnet: 'https://litnet.com/',
   wattpad: 'https://www.wattpad.com/myworks',
   ficbook: 'https://ficbook.net/',
-  ao3: 'https://archiveofourown.org/works/new',
+  rulate: 'https://tl.rulate.ru/',
 };
 
 export function isKitPlatform(value: string): value is KitPlatform {
@@ -135,8 +135,8 @@ function notes(platform: KitPlatform, words: number): string[] {
     ];
   }
   return [
-    'AO3 публикует фанфики. Оригинальный роман, который не является фанфиком, с площадки снимают.',
-    'На форме работы обязательны рейтинг, предупреждения архива, фандом и язык.',
+    'Рулейт публикует переводы и авторские книги. Главу вставляют в уже созданную книгу.',
+    'Цена главы, подписка и дата выхода отмечаются на Рулейте.',
     'В тексте остаются абзацы, жирный, курсив, подчёркивание и цитата.',
   ];
 }

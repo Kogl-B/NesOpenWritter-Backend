@@ -5,6 +5,7 @@ import { withMarkup } from './deepseek.js';
 import {
   buildOpenAIImageRequest,
   readGeneration,
+  aiBalanceRefusal,
   centsFromMicros,
   generateImageViaOpenAI,
   imageCostUsdMicros,
@@ -16,6 +17,13 @@ import {
 } from './openaiImage.js';
 
 describe('GPT Image 2.5', () => {
+  it('пускает услугу ИИ от 0.50 $ и останавливает меньший баланс', () => {
+    assert.equal(aiBalanceRefusal(50), null);
+    assert.equal(aiBalanceRefusal(51), null);
+    assert.match(aiBalanceRefusal(49) ?? '', /0\.50/);
+    assert.match(aiBalanceRefusal(0) ?? '', /0\.50/);
+  });
+
   it('принимает минимальный квадрат и отвергает кривой размер', () => {
     validateImageSize('816x816');
     for (const value of ['800x800', '817x816', '1024x400', '3840x3856']) {

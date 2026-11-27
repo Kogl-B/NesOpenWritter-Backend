@@ -1,3 +1,4 @@
+import { discordMessageApi, discordMessageUrl } from './discord.js';
 import { discordPayload, sponsrPayload, telegramPayload, telegramUrl, vkParams, vkUrl } from './payload.js';
 import { sponsrFailure } from './sponsrClient.js';
 
@@ -85,7 +86,11 @@ export async function postTelegram(token: string, chatId: string, text: string):
   return { id, url: telegramUrl(chatId, id) };
 }
 
-export async function postDiscord(webhook: string, text: string): Promise<{ id: string; url: string }> {
+export async function postDiscord(
+  webhook: string,
+  text: string,
+  channel?: { guildId?: string; channelId?: string },
+): Promise<{ id: string; url: string }> {
   const endpoint = webhook.includes('?') ? `${webhook}&wait=true` : `${webhook}?wait=true`;
   let res: Response;
   try {
@@ -102,8 +107,59 @@ export async function postDiscord(webhook: string, text: string): Promise<{ id: 
     const json = await readJson(res) as { message?: unknown } | null;
     throw new Error(clip(json?.message, 'Discord отклонил сообщение'));
   }
-  const json = await readJson(res) as { id?: unknown } | null;
-  return { id: json?.id == null ? '' : String(json.id), url: '' };
+  const json = await readJson(res) as { id?: unknown; channel_id?: unknown } | null;
+  const id = json?.id == null ? '' : String(json.id);
+  const channelId = typeof json?.channel_id === 'string' && json.channel_id
+    ? json.channel_id
+    : channel?.channelId ?? '';
+  return { id, url: discordMessageUrl(channel?.guildId ?? '', channelId, id) };
+}
+
+export async function editDiscordMessage(
+  webhook: string,
+  messageId: string,
+  text: string,
+  channel?: { guildId?: string; channelId?: string },
+): Promise<{ id: string; url: string }> {
+  let res: Response;
+  try {
+    res = await fetch(discordMessageApi(webhook, messageId), {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(discordPayload(text)),
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'Discord не нашёл сообщение') throw err;
+    throw new Error('Discord не ответил');
+  }
+  if (res.status === 404) throw new Error('Discord не нашёл сообщение');
+  if (!res.ok) {
+    const json = await readJson(res) as { message?: unknown } | null;
+    throw new Error(clip(json?.message, 'Discord не изменил сообщение'));
+  }
+  const json = await readJson(res) as { id?: unknown; channel_id?: unknown } | null;
+  const id = json?.id == null ? messageId : String(json.id);
+  const channelId = typeof json?.channel_id === 'string' && json.channel_id
+    ? json.channel_id
+    : channel?.channelId ?? '';
+  return { id, url: discordMessageUrl(channel?.guildId ?? '', channelId, id) };
+}
+
+export async function deleteDiscordMessage(webhook: string, messageId: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(discordMessageApi(webhook, messageId), {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'Discord не нашёл сообщение') throw err;
+    throw new Error('Discord не ответил');
+  }
+  if (res.status === 404 || res.status === 204 || res.ok) return;
+  const json = await readJson(res) as { message?: unknown } | null;
+  throw new Error(clip(json?.message, 'Discord не убрал сообщение'));
 }
 
 export { sponsrPayload };

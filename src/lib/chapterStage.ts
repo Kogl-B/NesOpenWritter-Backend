@@ -1,4 +1,4 @@
-const STAGES = new Set(['new', 'writing', 'done', 'checked', 'published', 'scheduled']);
+const STAGES = new Set(['new', 'done', 'checked', 'published', 'scheduled']);
 
 /** Теги главы: без пустых, без повторов, не длиннее сорока символов. */
 export function chapterTags(values: string[] | undefined): string[] | undefined {

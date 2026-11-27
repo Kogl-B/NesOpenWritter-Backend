@@ -48,8 +48,14 @@ export const DEFAULT_IMAGE_OPTIONS = {
   moderation: 'auto',
 } as const;
 
-/** Минимум долларов на счёте ИИ до платного запроса. Покрывает низкое качество. */
+/** Минимум долларов на счёте ИИ до любой платной услуги. */
 export const MIN_IMAGE_BALANCE_CENTS = 50;
+
+/** Пустая строка значит, что услугу можно запускать. */
+export function aiBalanceRefusal(cents: number): string | null {
+  if (typeof cents === 'number' && Number.isFinite(cents) && cents >= MIN_IMAGE_BALANCE_CENTS) return null;
+  return `Услуги ИИ доступны при балансе не меньше ${(MIN_IMAGE_BALANCE_CENTS / 100).toFixed(2)} $`;
+}
 
 export interface ImageOptions {
   model: string;

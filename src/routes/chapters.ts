@@ -1,12 +1,16 @@
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 
 import { Prisma } from '@prisma/client';
 
 import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership, toJson } from '../lib/access.js';
 import { tierIncludesRevisionHistory } from '../lib/tiers.js';
+import { isTimelineReady } from '../lib/timeline/publication.js';
+import { queueAutomaticTimelineAnalysis } from '../lib/timeline/schedule.js';
 import { countPlainText } from '../lib/plainText.js';
 import { assertScheduledDate, chapterPublishAt, chapterTags } from '../lib/chapterStage.js';
+import { chapterIsHidden, hideMetadata, revealMetadata } from '../lib/publish/visibility.js';
+import { withdrawChapterRemotes } from '../lib/publish/withdraw.js';
 import {
   chapterCreateSchema,
   chapterUpdateSchema,
@@ -17,6 +21,22 @@ import {
 } from '../lib/schemas.js';
 
 type ProjectParam = { projectId: string };
+
+async function chapterEventIsInProject(eventId: string, projectId: string): Promise<boolean> {
+  const event = await prisma.timelineEvent.findFirst({
+    where: { id: eventId, projectId },
+    select: { id: true },
+  });
+  return event !== null;
+}
+
+function queueTimelineAfterSave(req: FastifyRequest<{ Params: ProjectParam }>, chapterId: string) {
+  return queueAutomaticTimelineAnalysis({
+    userId: req.user!.id,
+    projectId: req.params.projectId,
+    chapterId,
+  }, req.log);
+}
 
 const revisionListSelect = {
   id: true,
@@ -130,12 +150,8 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         });
         if (!parent) return reply.status(400).send({ error: 'Parent chapter not in project' });
       }
-      if (input.eventId) {
-        const event = await prisma.timelineEvent.findFirst({
-          where: { id: input.eventId, projectId: req.params.projectId },
-          select: { id: true },
-        });
-        if (!event) return reply.status(400).send({ error: 'Event not in project' });
+      if (input.eventId && !(await chapterEventIsInProject(input.eventId, req.params.projectId))) {
+        return reply.status(400).send({ error: 'Event not in project' });
       }
       let stageFields;
       try {
@@ -160,6 +176,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
           ...stageFields,
         },
       });
+      if (input.content && isTimelineReady(chapter.stage)) await queueTimelineAfterSave(req, chapter.id);
       return reply.status(201).send({ chapter });
     },
   );
@@ -195,13 +212,27 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         });
         if (!parent) return reply.status(400).send({ error: 'Parent chapter not in project' });
       }
+      if (input.eventId && !(await chapterEventIsInProject(input.eventId, req.params.projectId))) {
+        return reply.status(400).send({ error: 'Event not in project' });
+      }
       let currentPublishAt: Date | null = null;
-      if (input.stage === 'scheduled' && input.publishAt === undefined) {
-        const current = await prisma.chapter.findFirst({
+      const previous = input.stage
+        ? await prisma.chapter.findFirst({
           where: { id: req.params.chapterId, projectId: req.params.projectId },
-          select: { publishAt: true },
-        });
-        currentPublishAt = current?.publishAt ?? null;
+          select: {
+            id: true,
+            stage: true,
+            publishAt: true,
+            metadata: true,
+            title: true,
+            content: true,
+            project: { select: { name: true } },
+          },
+        })
+        : null;
+      if (input.stage && !previous) return reply.status(404).send({ error: 'Chapter not found' });
+      if (input.stage === 'scheduled' && input.publishAt === undefined) {
+        currentPublishAt = previous?.publishAt ?? null;
       }
       let stageFields;
       try {
@@ -227,9 +258,37 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         },
       });
       if (result.count === 0) return reply.status(404).send({ error: 'Chapter not found' });
+      if (previous && input.stage && input.stage !== previous.stage) {
+        const saved = await prisma.chapter.findUnique({
+          where: { id: previous.id },
+          select: { metadata: true, title: true, content: true },
+        });
+        const leavingPublic = input.stage !== 'published'
+          && (!chapterIsHidden(previous.metadata) || previous.stage === 'published');
+        if (input.stage === 'published') {
+          await prisma.chapter.update({
+            where: { id: previous.id },
+            data: { metadata: toJson(revealMetadata(saved?.metadata ?? previous.metadata)) },
+          });
+        } else if (leavingPublic && saved) {
+          await prisma.chapter.update({
+            where: { id: previous.id },
+            data: { metadata: toJson(hideMetadata(saved.metadata)) },
+          });
+          await withdrawChapterRemotes(req.user!.id, {
+            id: previous.id,
+            title: saved.title,
+            content: saved.content,
+            book: previous.project.name,
+          });
+        }
+      }
       const chapter = await prisma.chapter.findUnique({
         where: { id: req.params.chapterId },
       });
+      if (chapter && isTimelineReady(chapter.stage) && (input.stage !== undefined || input.content !== undefined)) {
+        await queueTimelineAfterSave(req, req.params.chapterId);
+      }
       return { chapter };
     },
   );
@@ -329,7 +388,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
       const json = JSON.stringify(input.content);
       const chars = countPlainText(input.content).chars;
       const updated = await prisma.$queryRaw<
-        Array<{ id: string; wordCount: number; updatedAt: Date }>
+        Array<{ id: string; wordCount: number; updatedAt: Date; stage: string; timelineEnabled: boolean | null }>
       >(Prisma.sql`
         UPDATE chapters
         SET content = ${json}::jsonb,
@@ -337,12 +396,15 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
             "updatedAt" = now()
             ${input.wordCount !== undefined ? Prisma.sql`, "wordCount" = ${input.wordCount}` : Prisma.empty}
         WHERE id = ${req.params.chapterId} AND "projectId" = ${req.params.projectId}
-        RETURNING id, "wordCount", "updatedAt"
+        RETURNING id, "wordCount", "updatedAt", stage,
+          (SELECT settings #> '{timelineAnalysis,enabled}' = 'true'::jsonb FROM projects WHERE id = ${req.params.projectId}) AS "timelineEnabled"
       `);
-      if (updated.length === 0) {
+      if (!updated[0]) {
         return reply.status(404).send({ error: 'Chapter not found' });
       }
-      return { chapter: updated[0] };
+      const { stage, timelineEnabled, ...chapter } = updated[0];
+      if (timelineEnabled && isTimelineReady(stage)) await queueTimelineAfterSave(req, req.params.chapterId);
+      return { chapter };
     },
   );
 
@@ -567,6 +629,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
           wordCount: revision.wordCount,
         },
       });
+      if (isTimelineReady(chapter.stage)) await queueTimelineAfterSave(req, req.params.chapterId);
       return { chapter };
     },
   );

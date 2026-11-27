@@ -2,6 +2,8 @@ import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 
 import { auth } from '../lib/auth.js';
+import { browserOrigins, env } from '../lib/env.js';
+import { browserSource, writeNeedsBrowserOrigin } from '../lib/browserWritePolicy.js';
 
 type AuthSession = typeof auth.$Infer.Session;
 type AuthUser = AuthSession['user'];
@@ -28,18 +30,6 @@ function toWebHeaders(nodeHeaders: Record<string, string | string[] | undefined>
     }
   }
 
-  // Vercel rewrite (rewrites from `nes-open-writter.vercel.app/api/*` to
-  // Railway) strips the Origin header. Better-Auth requires Origin for CSRF
-  // protection on state-changing endpoints (sign-out, change-password, etc).
-  // Reconstruct Origin from X-Forwarded-* headers that Vercel adds. These
-  // headers are set by the trusted proxy, not by user input, so it's safe.
-  if (!headers.has('origin')) {
-    const fwdHost = headers.get('x-forwarded-host');
-    const fwdProto = headers.get('x-forwarded-proto') ?? 'https';
-    if (fwdHost) {
-      headers.set('origin', `${fwdProto}://${fwdHost}`);
-    }
-  }
 
   return headers;
 }
@@ -47,13 +37,26 @@ function toWebHeaders(nodeHeaders: Record<string, string | string[] | undefined>
 const authPlugin: FastifyPluginAsync = async (app) => {
   app.decorateRequest('user', null);
   app.decorateRequest('session', null);
+  const trusted = new Set(browserOrigins([env.BETTER_AUTH_URL, env.FRONTEND_URL]));
 
-  app.addHook('onRequest', async (req) => {
+  app.addHook('onRequest', async (req, reply) => {
+    if (writeNeedsBrowserOrigin(req.method, req.url)) {
+      const source = browserSource(req.headers);
+      if (!source || !trusted.has(source)) return reply.status(403).send({ error: 'Источник запроса не разрешён.' });
+    }
     const headers = toWebHeaders(req.headers);
-    const result = await auth.api.getSession({ headers });
-    if (result) {
-      req.user = result.user;
-      req.session = result.session;
+    // returnHeaders: продление сессии пишет Set-Cookie. Без переноса в ответ
+    // браузер остаётся со старой кукой и через время выкидывает на вход.
+    const result = await auth.api.getSession({ headers, returnHeaders: true });
+    if (!result) return;
+    const setCookies = result.headers?.getSetCookie?.() ?? [];
+    // /api/auth/* сам копирует заголовки ответа, иначе кука задвоится.
+    if (!req.url.startsWith('/api/auth/')) {
+      for (const cookie of setCookies) reply.header('set-cookie', cookie);
+    }
+    if (result.response) {
+      req.user = result.response.user;
+      req.session = result.response.session;
     }
   });
 
@@ -71,6 +74,8 @@ const authPlugin: FastifyPluginAsync = async (app) => {
     handler: async (req, reply) => {
       const url = new URL(req.url, `${req.protocol}://${req.hostname}`);
       const reqHeaders = toWebHeaders(req.headers);
+      const source = browserSource(req.headers);
+      if (!reqHeaders.has('origin') && source && trusted.has(source)) reqHeaders.set('origin', source);
 
       const request = new Request(url, {
         method: req.method,

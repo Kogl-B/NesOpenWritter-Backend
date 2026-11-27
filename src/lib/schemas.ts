@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 // ----- helpers --------------------------------------------------------------
 
-const jsonObject = z.record(z.unknown());
+const jsonObject = z.record(z.string(), z.unknown());
 const nullableString = z.string().nullish();
 const nullableId = z.string().min(1).nullish();
 
@@ -206,7 +206,7 @@ export const chapterCreateSchema = z.object({
   eventId: nullableId,
   locationId: nullableId,
   metadata: jsonObject.optional(),
-  stage: chapterStageEnum.optional(),
+  stage: chapterStageEnum.transform((stage) => stage === 'writing' ? 'new' : stage).optional(),
   publishAt: z.string().max(40).nullable().optional(),
   tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
 });
@@ -309,6 +309,10 @@ export const presignUploadSchema = z.object({
   contentType: z.string().min(1).max(100),
   kind: z.enum(['portrait', 'item', 'map', 'other']).default('other'),
   sizeBytes: z.number().int().positive().max(50 * 1024 * 1024).optional(),
+});
+
+export const completeUploadSchema = z.object({
+  key: z.string().trim().min(1).max(500),
 });
 
 // ----- Chapter content / revisions / mentions (Этап 4) ----------------------

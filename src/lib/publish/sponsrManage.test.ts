@@ -32,5 +32,21 @@ describe('sponsr manage form', () => {
     assert.equal(body.get('post_id'), '196350');
     assert.equal(body.get('post_notified'), '0');
     assert.equal(body.get('post_date'), '2026-11-22 15:00:00');
+    assert.equal(body.get('post_status'), 'active');
+  });
+
+  it('переводит пост в черновик и не зовёт подписчиков', () => {
+    const body = sponsrManageForm({
+      projectId: 10649,
+      postId: 196420,
+      title: 'Снятие',
+      html: '<p>Текст</p>',
+      notify: false,
+      date: '2026-11-22 15:30:00',
+      status: 'draft',
+    });
+    assert.equal(body.get('post_status'), 'draft');
+    assert.equal(body.get('post_notified'), '1');
+    assert.equal(body.get('post_id'), '196420');
   });
 });

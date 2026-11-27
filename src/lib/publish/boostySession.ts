@@ -118,6 +118,42 @@ export function boostyProfile(body: unknown): { name: string; blogUrl: string } 
   return { name, blogUrl: `https://boosty.to/${blog.replace(/^\/+/, '')}` };
 }
 
+/** Сессия из ответа входа по почте. Пароль в этот разбор не входит. */
+export function boostyLoginSession(json: unknown, deviceId: string): BoostySession {
+  const row = json && typeof json === 'object' && !Array.isArray(json) ? json as Record<string, unknown> : {};
+  const data = row.data && typeof row.data === 'object' && !Array.isArray(row.data)
+    ? row.data as Record<string, unknown>
+    : row;
+  const expiresIn = Number(data.expires_in ?? data.expiresIn);
+  const expiresAt = Number.isFinite(expiresIn) && expiresIn > 0
+    ? String(Math.floor(Date.now() / 1000) + Math.floor(expiresIn))
+    : expiresAtOf(data.expires_at ?? data.expiresAt);
+  const device = typeof data.device_id === 'string' && TOKEN.test(data.device_id) ? data.device_id : deviceId;
+  try {
+    return {
+      accessToken: tokenOf(data.access_token ?? data.accessToken, 'Токен доступа'),
+      refreshToken: tokenOf(data.refresh_token ?? data.refreshToken, 'Токен обновления'),
+      deviceId: tokenOf(device, 'Идентификатор устройства'),
+      expiresAt,
+    };
+  } catch {
+    throw new Error('Boosty не выдал сессию');
+  }
+}
+
+/** Текст отказа входа. Чужой пароль и токен сюда не попадают. */
+export function boostyLoginFailure(status: number, json: unknown): string {
+  const row = json && typeof json === 'object' && !Array.isArray(json) ? json as Record<string, unknown> : {};
+  const error = typeof row.error === 'string' ? row.error : '';
+  const description = typeof row.error_description === 'string' ? row.error_description : '';
+  if (status === 404 || error === 'not_found') return 'Boosty не нашёл такой email';
+  if (/captcha|recaptcha/i.test(`${error} ${description}`)) {
+    return 'Boosty просит проверку «не робот». Вставьте сессию из браузера.';
+  }
+  const text = description.replace(/\s+/g, ' ').trim().slice(0, 180);
+  return text || 'Boosty не пустил';
+}
+
 export function sessionFromRefresh(current: BoostySession, body: unknown): BoostySession {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     throw new Error('Boosty не обновил сессию');

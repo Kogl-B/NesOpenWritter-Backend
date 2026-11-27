@@ -2,46 +2,12 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { assertProjectOwnership, getProjectAccess } from '../lib/access.js';
-import { generateEpub, generateDocx, generatePdf, generateFb2 } from '../lib/exporters.js';
+import { generateEpub, generateDocx, generatePdf, generateFb2, manuscriptChapters } from '../lib/exporters.js';
 
 /**
  * v1.4-v3.0 — Дополнительные модули: знания, календарь, симулятор черт,
  * доска расследований, экспорт, совместная работа.
  */
-function manuscriptChapters(
-  chapters: Array<{
-    id: string;
-    title: string;
-    content: unknown;
-    wordCount: number;
-    kind: string;
-    parentId: string | null;
-    orderIndex: number;
-  }>,
-) {
-  const roots = chapters.filter((c) => !c.parentId).sort((a, b) => a.orderIndex - b.orderIndex);
-  const ordered: typeof chapters = [];
-  const used = new Set<string>();
-  for (const root of roots) {
-    ordered.push(root);
-    used.add(root.id);
-    for (const child of chapters.filter((c) => c.parentId === root.id).sort((a, b) => a.orderIndex - b.orderIndex)) {
-      ordered.push(child);
-      used.add(child.id);
-    }
-  }
-  for (const chapter of chapters) {
-    if (!used.has(chapter.id)) ordered.push(chapter);
-  }
-  return ordered.map((c) => ({
-    id: c.id,
-    title: c.title,
-    content: c.content,
-    wordCount: c.wordCount,
-    kind: c.kind,
-  }));
-}
-
 export async function featureRoutes(app: FastifyInstance) {
   const checkProject = async (req: FastifyRequest<{ Params: { projectId: string } }>, reply: FastifyReply) => {
     app.requireAuth(req);
@@ -108,9 +74,20 @@ export async function featureRoutes(app: FastifyInstance) {
         moonCount: z.number().int().min(0).max(5).default(1),
         epochName: z.string().trim().max(50).default('Новая эра'),
         currentYear: z.number().int().default(1),
+        epochFrom: z.number().int().optional(),
+        epochTo: z.number().int().optional(),
       }).parse(req.body);
+      const { epochFrom, epochTo, ...rest } = input;
       const calendar = await prisma.calendar.create({
-        data: { ...input, projectId: req.params.projectId },
+        data: {
+          ...rest,
+          ...(epochFrom !== undefined && { currentYear: epochFrom }),
+          projectId: req.params.projectId,
+          settings: {
+            ...(epochFrom !== undefined && { epochFrom }),
+            ...(epochTo !== undefined && { epochTo }),
+          },
+        },
       });
       return reply.status(201).send({ calendar });
     },
@@ -127,6 +104,8 @@ export async function featureRoutes(app: FastifyInstance) {
         moonCount: z.number().int().min(0).max(5).optional(),
         epochName: z.string().trim().max(50).optional(),
         currentYear: z.number().int().optional(),
+        epochFrom: z.number().int().optional(),
+        epochTo: z.number().int().optional(),
         isDefault: z.boolean().optional(),
         settings: z.record(z.string(), z.unknown()).optional(),
       }).parse(req.body);
@@ -138,13 +117,30 @@ export async function featureRoutes(app: FastifyInstance) {
         });
       }
       try {
-        const { settings, ...rest } = input;
+        const { settings, epochFrom, epochTo, ...rest } = input;
+        let nextSettings = settings;
+        if (epochFrom !== undefined || epochTo !== undefined) {
+          const existing = await prisma.calendar.findFirst({
+            where: { id: req.params.calendarId, projectId: req.params.projectId },
+            select: { settings: true },
+          });
+          const prev = existing?.settings && typeof existing.settings === 'object' && !Array.isArray(existing.settings)
+            ? existing.settings as Record<string, unknown>
+            : {};
+          nextSettings = {
+            ...prev,
+            ...(settings ?? {}),
+            ...(epochFrom !== undefined && { epochFrom }),
+            ...(epochTo !== undefined && { epochTo }),
+          };
+        }
         const calendar = await prisma.calendar.update({
           where: { id: req.params.calendarId },
           data: {
             ...rest,
-            ...(settings !== undefined && {
-              settings: settings as unknown as import('@prisma/client').Prisma.InputJsonValue,
+            ...(epochFrom !== undefined && { currentYear: epochFrom }),
+            ...(nextSettings !== undefined && {
+              settings: nextSettings as unknown as import('@prisma/client').Prisma.InputJsonValue,
             }),
           },
         });

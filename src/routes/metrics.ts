@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
+import { getUserPlan } from './account.js';
 import { tierShowsAds } from '../lib/tiers.js';
 import {
   bumpMetric,
@@ -26,6 +27,11 @@ const adEventSchema = z.object({
 
 function markerOf(req: { ip: string; user?: { id: string } | null }): string {
   return req.user?.id ?? req.ip;
+}
+
+async function audienceShowsAds(userId?: string): Promise<boolean> {
+  if (!userId) return true;
+  return tierShowsAds(await getUserPlan(userId));
 }
 
 export const metricsRoutes: FastifyPluginAsync = async (app) => {
@@ -71,13 +77,11 @@ export const metricsRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true };
   });
 
-  app.get<{ Params: { slot: string } }>('/api/ads/:slot', async (req) => {
+  app.get<{ Params: { slot: string } }>('/api/ads/:slot', async (req, reply) => {
+    reply.header('Cache-Control', 'private, no-store');
+    if (!(await audienceShowsAds(req.user?.id))) return { ad: null };
     const ad = await prisma.houseAd.findUnique({ where: { id: req.params.slot } });
     if (!ad || !ad.enabled || ad.audience !== 'free') return { ad: null };
-    if (req.user) {
-      const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { plan: true } });
-      if (!tierShowsAds(user?.plan)) return { ad: null };
-    }
     return {
       ad: { id: ad.id, title: ad.title, body: ad.body, href: ad.href },
     };
@@ -85,11 +89,12 @@ export const metricsRoutes: FastifyPluginAsync = async (app) => {
 
   app.post<{ Params: { slot: string } }>('/api/ads/:slot/event', async (req, reply) => {
     const input = adEventSchema.parse(req.body ?? {});
+    if (!(await audienceShowsAds(req.user?.id))) return reply.status(204).send();
     const ad = await prisma.houseAd.findUnique({
       where: { id: req.params.slot },
-      select: { id: true, enabled: true },
+      select: { id: true, enabled: true, audience: true },
     });
-    if (!ad?.enabled) return reply.status(204).send();
+    if (!ad?.enabled || ad.audience !== 'free') return reply.status(204).send();
     const marker = markerOf(req);
     const windowMs = input.type === 'show' ? 10 * 60 * 1000 : 2000;
     if (!recentlySeen(`ad:${input.type}:${marker}:${ad.id}`, windowMs)) {

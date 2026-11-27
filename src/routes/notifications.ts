@@ -3,17 +3,20 @@ import { z } from 'zod';
 
 import { toJson } from '../lib/access.js';
 import { prisma } from '../lib/prisma.js';
-import { mergeNoticeSettings, NOTICE_KINDS, noticePrefs } from '../lib/notify/drafts.js';
+import {
+  mergeNoticeSettings,
+  NOTICE_KINDS,
+  noticePrefs,
+  publicNoticeBody,
+  type NoticeKind,
+} from '../lib/notify/drafts.js';
 
-const kindSchema = z.enum(NOTICE_KINDS);
-const settingsSchema = z.object({
-  chapter: z.boolean().optional(),
-  book_comment: z.boolean().optional(),
-  comment_reply: z.boolean().optional(),
-  blog_post: z.boolean().optional(),
-  blog_comment: z.boolean().optional(),
-  reader_report: z.boolean().optional(),
-}).refine((row) => Object.values(row).some((value) => value !== undefined), 'Нечего сохранять');
+const kindSchema = z.enum([...NOTICE_KINDS, 'admin_message']);
+const settingsSchema = z.object(
+  Object.fromEntries(NOTICE_KINDS.map((kind) => [kind, z.boolean().optional()])) as {
+    [K in NoticeKind]: z.ZodOptional<z.ZodBoolean>;
+  },
+).refine((row) => Object.values(row).some((value) => value !== undefined), 'Нечего сохранять');
 
 const readSchema = z.object({
   all: z.boolean().optional(),
@@ -43,8 +46,8 @@ export const notificationRoutes: FastifyPluginAsync = async (app) => {
         id: row.id,
         kind: row.kind,
         title: row.title,
-        body: row.body,
-        href: row.href.startsWith('/') && !row.href.startsWith('//') ? row.href : '/account?section=notices',
+        body: publicNoticeBody(row.body),
+        href: row.href.startsWith('/') && !row.href.startsWith('//') ? row.href : '/notices',
         read: row.readAt != null,
         createdAt: row.createdAt.toISOString(),
       })),

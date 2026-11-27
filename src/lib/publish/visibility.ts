@@ -18,3 +18,11 @@ export function revealMetadata(metadata: unknown): Record<string, unknown> {
     : {};
   return { ...base, public: true };
 }
+
+/** Скрывает главу с сайта и оставляет остальные поля metadata. */
+export function hideMetadata(metadata: unknown): Record<string, unknown> {
+  const base = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? { ...(metadata as Record<string, unknown>) }
+    : {};
+  return { ...base, public: false };
+}

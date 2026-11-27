@@ -57,6 +57,9 @@ const envSchema = z.object({
   GEO_EDGE_TOKEN: z.string().optional().default(''),
   // Только не production: подменить страну посетителя, чтобы проверить ограничение локально.
   GEO_DEV_COUNTRY: z.string().optional().default(''),
+
+  // Общий бот автопоста. Пусто — карточка Telegram на сайте скажет, что бот не настроен.
+  TELEGRAM_BOT_TOKEN: z.string().optional().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -69,3 +72,23 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 export type Env = typeof env;
+
+/** localhost и 127.0.0.1 — разные сайты для cookie. Держим оба, иначе вход с одного адреса не виден с другого. */
+export function browserOrigins(extra: string[] = []): string[] {
+  const out = new Set<string>();
+  for (const item of [...env.CORS_ORIGIN.split(','), ...extra]) {
+    const origin = item.trim();
+    if (!origin) continue;
+    out.add(origin);
+    try {
+      const url = new URL(origin);
+      if (url.hostname === 'localhost') url.hostname = '127.0.0.1';
+      else if (url.hostname === '127.0.0.1') url.hostname = 'localhost';
+      else continue;
+      out.add(url.origin);
+    } catch {
+      /* не URL — оставляем как есть */
+    }
+  }
+  return [...out];
+}

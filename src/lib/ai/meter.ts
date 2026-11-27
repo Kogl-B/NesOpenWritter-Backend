@@ -54,8 +54,8 @@ export function quotaFor(status: AccountStatus, provider: { testQuota: number; r
   return raw > 0 ? raw : null;
 }
 
-export async function usageSince(userId: string, since: Date) {
-  const sum = await prisma.aiUsage.aggregate({
+export async function usageSince(userId: string, since: Date, db: Pick<typeof prisma, 'aiUsage'> = prisma) {
+  const sum = await db.aiUsage.aggregate({
     where: { userId, createdAt: { gte: since } },
     _sum: { totalTokens: true, costUsdMicros: true },
     _count: true,
@@ -77,13 +77,13 @@ export async function recordUsage(input: {
   peakMultiplier: number;
   provider?: string;
   costUsdMicros?: number;
-}) {
+}, db: Pick<typeof prisma, 'aiUsage'> = prisma) {
   const provider = input.provider ?? 'deepseek';
   const peak = provider === 'deepseek' && isPeakHour();
   const cost = input.costUsdMicros != null
     ? input.costUsdMicros
     : costUsdMicros(input.usage, input.prices, peak, input.peakMultiplier);
-  return prisma.aiUsage.create({
+  return db.aiUsage.create({
     data: {
       userId: input.userId,
       projectId: input.projectId,
