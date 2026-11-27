@@ -160,6 +160,98 @@ test('public catalog, request identity and quotas on isolated PostgreSQL', async
       assert.ok(profile.json().books.every((book: { authorId: string }) => book.authorId === author.id));
     });
 
+    await t.test('continuing a book restores the latest position independently of reading statistics', async () => {
+      const project = await prisma.project.create({ data: {
+        id: 'resume-qa-book', ownerId: readerId, name: 'Парус и маяк',
+        settings: { catalog: { published: true, cycle: 'Остров', cycleOrder: 1 } },
+      } });
+      const body = Array.from({ length: 35 }, (_, index) => ({
+        type: 'paragraph', content: [{ type: 'text', text: `Параграф ${index + 1}. ${'Длинный текст об острове. '.repeat(18)}` }],
+      }));
+      const chapters = await Promise.all(['Первая глава', 'Вторая глава'].map((title, orderIndex) => prisma.chapter.create({
+        data: { id: 'resume-qa-chapter-' + orderIndex, projectId: project.id, title, orderIndex,
+          content: { type: 'doc', content: body }, wordCount: 1800, charCount: 14000 },
+      })));
+      const what = async () => (await app.inject({
+        url: '/api/catalog/continue?book=' + project.id, headers: { ...headers, cookie },
+      })).json().positions;
+      assert.equal((await app.inject({ url: '/api/catalog/continue' })).statusCode, 401);
+      await prisma.readProgress.create({ data: {
+        userId: readerId, projectId: project.id, chapterId: chapters[0]!.id, percent: 90, charsSeen: 12600,
+      } });
+      assert.equal((await what())[0].fraction, 9000);
+      const now = Date.now() - 10_000;
+      const url = '/api/catalog/books/' + project.id + '/position';
+      const set = (chapterId: string, fraction: number, observedAt: number) => app.inject({
+        method: 'PUT', url, headers: { ...headers, origin, cookie },
+        payload: { chapterId, fraction, block: 10, offset: 3300, observedAt, version: 'revision' },
+      });
+      assert.equal((await set(chapters[1]!.id, 7200, now + 300)).statusCode, 204);
+      assert.equal((await set(chapters[0]!.id, 8800, now + 50)).statusCode, 204);
+      assert.equal((await what())[0].chapterId, chapters[1]!.id);
+      assert.equal((await set(chapters[1]!.id, 2400, now + 500)).statusCode, 204);
+      const [point] = await what();
+      assert.equal(point.fraction, 2400);
+      assert.equal(point.block, 10);
+      assert.equal(point.chapterTitle, 'Вторая глава');
+      assert.equal((await prisma.readProgress.findFirstOrThrow({ where: { projectId: project.id } })).percent, 90);
+      assert.equal((await set('unknown-chapter', 0, now + 900)).statusCode, 404);
+
+      await prisma.geoBlock.create({ data: { kind: 'chapter', targetId: chapters[1]!.id, countries: ['RU'] } });
+      const { clearGeoCache } = await import('../lib/geo/request.js');
+      clearGeoCache();
+      try {
+        assert.equal((await set(chapters[1]!.id, 0, now + 1200)).statusCode, 451);
+        assert.deepEqual(await what(), []);
+      } finally {
+        await prisma.geoBlock.delete({ where: { kind_targetId: { kind: 'chapter', targetId: chapters[1]!.id } } });
+        clearGeoCache();
+      }
+    });
+
+    await t.test('ordered cycle branches, a unique entry point and bounded search suggestions', async () => {
+      const create = (id: string, name: string, order: number, branch = '', published = true) => prisma.project.create({ data: {
+        id, ownerId: readerId, name,
+        settings: { catalog: { published, cycle: 'Остров', cycleOrder: order, cycleBranch: branch } },
+      } });
+      const [second, spin] = await Promise.all([
+        create('resume-qa-sequel', 'Парус возвращается', 3),
+        create('resume-qa-spinoff', 'Парус в тумане', 1, 'Другая ветка'),
+        create('resume-qa-unpublished', 'Парус скрыт', 2, '', false),
+      ]);
+      const catalogue = await app.inject({ url: '/api/catalog/books/resume-qa-book', headers });
+      assert.equal(catalogue.statusCode, 200, catalogue.body.slice(0, 300));
+      assert.deepEqual(ids(catalogue.json().series.books), ['resume-qa-book', second.id, spin.id]);
+      assert.equal(catalogue.json().series.nextId, second.id);
+      const spinBook = await app.inject({ url: '/api/catalog/books/' + spin.id, headers });
+      assert.equal(spinBook.json().series.nextId, null);
+
+      const setEntry = (id: string, catalog: Record<string, unknown> = { cycle: 'Остров', cycleEntry: true }) => app.inject({
+        method: 'PATCH', url: '/api/projects/' + id, headers: { cookie, origin },
+        payload: { settings: { catalog } },
+      });
+      for (const result of await Promise.all([setEntry(second.id), setEntry(spin.id)])) {
+        assert.equal(result.statusCode, 200, result.body.slice(0, 300));
+      }
+      await setEntry('resume-qa-book', { cycle: 'Остров', published: true });
+      const books = (await app.inject({ url: '/api/catalog/books/resume-qa-book', headers })).json().series.books;
+      assert.equal(books.filter((book: { cycleEntry: boolean }) => book.cycleEntry).length, 1);
+      assert.equal(books[0].cycleOrder, 1);
+
+      const suggest = async (q: string, signedIn = false) => {
+        const response = await app.inject({ url: '/api/catalog/suggest?' + new URLSearchParams({ q }),
+          headers: signedIn ? { ...headers, cookie } : headers });
+        assert.equal(response.statusCode, 200, response.body.slice(0, 300));
+        return response.json();
+      };
+      assert.deepEqual(await suggest('п'), { books: [], authors: [] });
+      assert.deepEqual(ids((await suggest('парус')).books).sort(), ['resume-qa-book', second.id, spin.id].sort());
+      const byNickname = await suggest('@ветрова_перо', true);
+      assert.deepEqual(ids(byNickname.authors), [author.id]);
+      assert.equal(byNickname.books.length, 5);
+      assert.ok(byNickname.books.every((book: { id: string }) => book.id !== blockedBook && book.id !== geoBook));
+    });
+
     await t.test('client identity comes from the verified provider or the connected peer', () => {
       assert.deepEqual(selectRequestNetwork({ headers, edgeToken, peer: '192.0.2.1', railwayHttpIngress: true }),
         { address: '192.0.2.20', country: 'RU' });

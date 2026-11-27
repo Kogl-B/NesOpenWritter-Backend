@@ -203,10 +203,20 @@ export async function searchCatalog(scope: CatalogVisibility, query: CatalogQuer
   return { ids: row!.ids, total: row!.total, page, pageSize: PAGE_SIZE };
 }
 
+export async function suggestBookIds(scope: CatalogVisibility, query: string, now: number) {
+  const filters = searchScope({ q: query }, now);
+  if (!filters.term.text) return [];
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    ${browse(scope, now, filters, 'candidates')}
+    SELECT id FROM candidates WHERE relevance <= 3 ORDER BY relevance, "createdAt" DESC, id LIMIT 5
+  `;
+  return rows.map(row => row.id);
+}
+
 type Writer = { id: string; name: string; nickname: string | null; image: string | null; books: number };
 const AUTHORS_PER_PAGE = 24;
 
-export async function searchAuthors(scope: CatalogVisibility, query: string, page: number) {
+export async function searchAuthors(scope: CatalogVisibility, query: string, page: number, pageSize = AUTHORS_PER_PAGE) {
   const term = catalogTerm(query);
   const name = Prisma.sql`b."authorName"`;
   const nickname = Prisma.sql`b.nickname`;
@@ -230,11 +240,11 @@ export async function searchAuthors(scope: CatalogVisibility, query: string, pag
       COALESCE((
         SELECT jsonb_agg(to_jsonb(a) - 'relevance' ORDER BY relevance, lower(name), id) FROM (
           SELECT * FROM authors ORDER BY relevance, lower(name), id
-          LIMIT ${AUTHORS_PER_PAGE} OFFSET ${(page - 1) * AUTHORS_PER_PAGE}
+          LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}
         ) a
       ), '[]'::jsonb) AS authors
   `;
-  return { ...row!, page, pageSize: AUTHORS_PER_PAGE };
+  return { ...row!, page, pageSize };
 }
 
 export type HomeShelf = 'popular' | 'hot' | 'updates' | 'bestsellers' | 'arrivals' | 'reading' | 'liked' | 'favorites';

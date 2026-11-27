@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
@@ -12,8 +13,10 @@ import { countryBlocks, denyCatalogGeo, denyGeo } from '../lib/geo/request.js';
 import { bookDigestKey, bookSubscriptionNotice, commentNotices, digestDay, readerReportNotice } from '../lib/notify/drafts.js';
 import { writeDigest, writeNotices } from '../lib/notify/deliver.js';
 import { coverHref } from '../lib/ai/place.js';
-import { homeCatalog, searchAuthors, searchCatalog, topCatalog, type CatalogVisibility, type HomeShelf } from '../lib/catalogBrowse.js';
+import { homeCatalog, searchAuthors, searchCatalog, suggestBookIds, topCatalog, type CatalogVisibility, type HomeShelf } from '../lib/catalogBrowse.js';
 import { viewerBlocks } from '../lib/viewerBlocks.js';
+import { bookCycle, cycleSettings, inCycleOrder } from '../lib/bookCycles.js';
+import { positionSchema, recentReadingPositions, saveReadingPosition } from '../lib/readingPositions.js';
 import { readerAccessOf } from '../lib/readerAccess.js';
 import { cachedReaderPages, pageHeight, PAGE_WIDTH, readerPages, renderReaderPage } from '../lib/protectedReader.js';
 import { generateEpub } from '../lib/exporters.js';
@@ -48,6 +51,9 @@ export interface BookCard {
   tags: string[];
   status: 'writing' | 'complete' | 'frozen';
   cycle: string;
+  cycleOrder: number | null;
+  cycleBranch: string;
+  cycleEntry: boolean;
   authorNote: string;
   createdAt: string;
   updatedAt: string;
@@ -81,6 +87,7 @@ function metaOf(settings: unknown) {
     tags,
     status: status as BookCard['status'],
     cycle: typeof catalog.cycle === 'string' ? catalog.cycle : '',
+    ...cycleSettings(catalog),
     authorNote: typeof catalog.authorNote === 'string' ? catalog.authorNote : '',
     cover: coverHref(root.cover),
     structure: root.structure === 'chapters' ? 'chapters' as const : 'chapters-scenes' as const,
@@ -142,6 +149,9 @@ async function loadBooks(userId: string | null, selectedIds?: string[], ownerId?
       tags: meta.tags,
       status: meta.status,
       cycle: meta.cycle,
+      cycleOrder: meta.cycleOrder,
+      cycleBranch: meta.cycleBranch,
+      cycleEntry: meta.cycleEntry,
       authorNote: meta.authorNote,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -488,6 +498,46 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     return searchAuthors(await catalogVisibility(req), q, page);
   });
 
+  app.get('/api/catalog/suggest', { config: { rateLimit: { max: 120 } } }, async (req, reply) => {
+    reply.header('Cache-Control', 'private, no-store');
+    const { q = '' } = z.object({ q: z.string().trim().max(160).optional() }).parse(req.query);
+    if (Array.from(q.replace(/^@/, '')).length < 2) return { books: [], authors: [] };
+    const scope = await catalogVisibility(req);
+    const [ids, { authors }] = await Promise.all([
+      suggestBookIds(scope, q, Date.now()),
+      searchAuthors(scope, q, 1, 4),
+    ]);
+    const cards = await catalogCards(scope.userId, ids);
+    const books = orderedCards(ids, cards).map(({ id, title, cover, authorName }) => ({
+      id, title, cover: cover.length <= 2048 ? cover : '', authorName,
+    }));
+    return { books, authors };
+  });
+
+  app.get('/api/catalog/continue', async (req, reply) => {
+    app.requireAuth(req);
+    reply.header('Cache-Control', 'private, no-store');
+    const { book } = z.object({ book: z.string().min(1).max(128).optional() }).parse(req.query);
+    const [scope, geo] = await Promise.all([catalogVisibility(req), countryBlocks(req)]);
+    const chapters = [...geo.index.chapters].filter(([, countries]) => geo.country && countries.has(geo.country)).map(([id]) => id);
+    return { positions: await recentReadingPositions(req.user!.id, book, {
+      books: scope.excludedBooks, authors: scope.excludedAuthors, chapters,
+    }) };
+  });
+
+  app.put<{ Params: { id: string } }>('/api/catalog/books/:id/position', { config: { rateLimit: { max: 120 } } }, async (req, reply) => {
+    app.requireAuth(req);
+    const point = positionSchema.parse(req.body);
+    const { id } = req.params;
+    const scope = await publicReading(req, reply, id);
+    if (!scope) return reply;
+    const chapter = await prisma.chapter.findFirst({ where: { id: point.chapterId, projectId: id }, select: { metadata: true } });
+    if (!chapter || chapterIsHidden(chapter.metadata)) return reply.status(404).send({ error: 'Глава недоступна' });
+    if (chapterBlocked(scope.geo.index, scope.geo.country, id, point.chapterId)) return denyGeo(reply);
+    await saveReadingPosition(req.user!.id, id, point);
+    return reply.status(204).send();
+  });
+
   app.get('/api/catalog/tops', { config: { rateLimit: { max: 90 } } }, async (req, reply) => {
     reply.header('Cache-Control', 'private, no-store');
     const scope = await catalogVisibility(req);
@@ -541,8 +591,15 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
       words: reading.reduce((sum, chapter) => sum + chapter.wordCount, 0),
       chapters: reading.length,
     };
+    const series = bookCycle(book, shelf);
     return {
       book: publicBook,
+      series: series && {
+        ...series,
+        books: series.books.map(({ id, title, cycleOrder, cycleBranch, cycleEntry, shelf }) => ({
+          id, title, cycleOrder, cycleBranch, cycleEntry, shelf,
+        })),
+      },
       chapters: visibleChapters,
       readingChapters: reading,
       comments: visibleComments.map((row) => publicBookComment(row, row.parentId ? parentNames.get(row.parentId) ?? '' : '')),
@@ -613,6 +670,9 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
       chapter: {
         id: chapter.id,
         title: chapter.title,
+        version: createHash('sha256').update(JSON.stringify([
+          scope.access.protectCopy, ...parts.map(part => [part.id, part.updatedAt]),
+        ])).digest('base64url').slice(0, 22),
         ...(pages ? { protectedPages: pages } : whole ? {
           contents: parts.map((part) => publicDirectoryContent(scope.project.settings, part.content)), contentChapterIds: parts.map((part) => part.id),
         } : { content: publicDirectoryContent(scope.project.settings, chapter.content) }),
@@ -926,7 +986,7 @@ function cyclesOf(books: BookCard[]): Array<{ name: string; books: BookCard[] }>
   }
   return [...groups.entries()]
     .sort((a, b) => a[0].localeCompare(b[0], 'ru'))
-    .map(([name, list]) => ({ name, books: list }));
+    .map(([name, list]) => ({ name, books: inCycleOrder(list) }));
 }
 
 async function hideBooks(req: FastifyRequest, books: BookCard[]): Promise<BookCard[]> {

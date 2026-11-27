@@ -58,6 +58,7 @@ model User {
   aiUsages     AiUsage[]
   errorReports AppErrorReport[]
   readProgress ReadProgress[]
+  readingPositions ReadingPosition[]
   bookSubscriptions BookSubscription[]
   chapterRevisions ChapterRevision[]
   publishAccounts  PublishAccount[]
@@ -472,6 +473,7 @@ model Project {
   items               Item[]
   locations           Location[]
   events              TimelineEvent[]
+  readingPositions     ReadingPosition[]
   chapters            Chapter[]
   tags                Tag[]
   mapElements         MapElement[]
@@ -884,6 +886,7 @@ model Chapter {
   mentions  SceneMention[]
   ledger    CharacterLedger[]
   reads     ReadProgress[]
+  readingPositions ReadingPosition[]
   publishDeliveries PublishDelivery[]
   readerNotices ReaderNotice[]
 
@@ -1502,6 +1505,27 @@ model ReadProgress {
   @@index([projectId])
   @@index([userId, updatedAt])
   @@map("read_progress")
+}
+
+model ReadingPosition {
+  userId     String
+  projectId  String
+  chapterId  String
+  version    String
+  block      Int?
+  offset     Int
+  fraction   Int
+  observedAt DateTime
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  chapter Chapter @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  @@id([userId, projectId])
+  @@index([userId, observedAt(sort: Desc)])
+  @@index([chapterId])
+  @@index([projectId])
+  @@map("reading_positions")
 }
 
 /// Встроенный блок для бесплатного тарифа и гостей.
