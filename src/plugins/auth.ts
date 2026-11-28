@@ -3,6 +3,7 @@ import fp from 'fastify-plugin';
 
 import { auth } from '../lib/auth.js';
 import { browserOrigins, env } from '../lib/env.js';
+import { requestNetwork, VERIFIED_IP_HEADER } from '../lib/requestNetwork.js';
 import { browserSource, writeNeedsBrowserOrigin } from '../lib/browserWritePolicy.js';
 
 type AuthSession = typeof auth.$Infer.Session;
@@ -19,10 +20,10 @@ declare module 'fastify' {
   }
 }
 
-function toWebHeaders(nodeHeaders: Record<string, string | string[] | undefined>): Headers {
+function toWebHeaders(req: FastifyRequest): Headers {
   const headers = new Headers();
-  for (const [key, value] of Object.entries(nodeHeaders)) {
-    if (value === undefined) continue;
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value === undefined || key === VERIFIED_IP_HEADER || key === 'x-ow-geo-token') continue;
     if (Array.isArray(value)) {
       for (const v of value) headers.append(key, v);
     } else {
@@ -30,6 +31,8 @@ function toWebHeaders(nodeHeaders: Record<string, string | string[] | undefined>
     }
   }
 
+  const { address } = requestNetwork(req);
+  if (address) headers.set(VERIFIED_IP_HEADER, address);
   return headers;
 }
 
@@ -44,7 +47,7 @@ const authPlugin: FastifyPluginAsync = async (app) => {
       if (!source || !trusted.has(source)) return reply.status(403).send({ error: 'Источник запроса не разрешён.' });
     }
     if (req.routeOptions.url === '/api/auth/*') return;
-    const headers = toWebHeaders(req.headers);
+    const headers = toWebHeaders(req);
     // returnHeaders: продление сессии пишет Set-Cookie. Без переноса в ответ
     // браузер остаётся со старой кукой и через время выкидывает на вход.
     const result = await auth.api.getSession({ headers, returnHeaders: true });
@@ -76,7 +79,7 @@ const authPlugin: FastifyPluginAsync = async (app) => {
       const queryStart = req.url.indexOf('?');
       url.pathname = queryStart === -1 ? req.url : req.url.slice(0, queryStart);
       url.search = queryStart === -1 ? '' : req.url.slice(queryStart);
-      const reqHeaders = toWebHeaders(req.headers);
+      const reqHeaders = toWebHeaders(req);
       const source = browserSource(req.headers);
       if (!reqHeaders.has('origin') && source && trusted.has(source)) reqHeaders.set('origin', source);
 

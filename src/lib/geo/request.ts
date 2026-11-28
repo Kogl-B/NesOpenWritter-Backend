@@ -2,6 +2,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { env } from '../env.js';
 import { prisma } from '../prisma.js';
+import { requestNetwork } from '../requestNetwork.js';
 import { countryOfIp } from './lookup.js';
 import {
   GEO_DENIED,
@@ -11,8 +12,6 @@ import {
   chapterBlocked,
   indexBlocks,
   postBlocked,
-  publicIp,
-  trustedCountry,
   type GeoIndex,
 } from './policy.js';
 import { knownCountry } from './countries.js';
@@ -27,23 +26,13 @@ export function clearGeoCache(): void {
   cached = null;
 }
 
-function headerValue(value: string | string[] | undefined): string {
-  if (Array.isArray(value)) return value[0] ?? '';
-  return value ?? '';
-}
-
 export function visitorCountry(req: FastifyRequest): string | null {
   if (env.NODE_ENV !== 'production') {
     const dev = knownCountry(env.GEO_DEV_COUNTRY);
     if (dev) return dev;
   }
-  const fromEdge = trustedCountry(
-    headerValue(req.headers['x-ow-country']),
-    headerValue(req.headers['x-ow-geo-token']),
-    env.GEO_EDGE_TOKEN,
-  );
-  if (fromEdge) return fromEdge;
-  return countryOfIp(publicIp(headerValue(req.headers['x-forwarded-for'])));
+  const { country, address } = requestNetwork(req);
+  return country ?? countryOfIp(address);
 }
 
 export async function loadGeoIndex(): Promise<GeoIndex> {

@@ -10,6 +10,7 @@ import {
   sendTwoFactorEnabledEmail,
   sendVerificationEmail,
 } from './email.js';
+import { VERIFIED_IP_HEADER } from './requestNetwork.js';
 import { logger } from './logger.js';
 
 const isProd = env.NODE_ENV === 'production';
@@ -85,6 +86,7 @@ export const auth = betterAuth({
   },
 
   advanced: {
+    ipAddress: { ipAddressHeaders: [VERIFIED_IP_HEADER] },
     cookiePrefix: 'nesow',
     useSecureCookies: isProd,
     defaultCookieAttributes: {

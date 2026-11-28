@@ -5,6 +5,7 @@ import { adsenseCredentialsReady, adsenseDay, previousDay, publisherPattern, syn
 import { currencySchema, exposureToken, externalAdLink, livePostFilter, placementSchema, readExposureToken } from '../lib/advertising.js';
 import { env } from '../lib/env.js';
 import { prisma } from '../lib/prisma.js';
+import { serviceAccess } from '../lib/serviceSubscriptions.js';
 import { tierShowsAds } from '../lib/tiers.js';
 import { dayKey } from '../lib/traffic.js';
 
@@ -83,10 +84,7 @@ export const advertisingRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Params: { slot: string } }>('/api/advertising/placement/:slot', async (req, reply) => {
     reply.header('Cache-Control', 'private, no-store');
     const slot = placementSchema.parse(req.params.slot);
-    if (req.user) {
-      const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { plan: true } });
-      if (!tierShowsAds(user?.plan)) return { ad: null };
-    }
+    if (req.user && !tierShowsAds((await serviceAccess(prisma, req.user.id)).plan)) return { ad: null };
     const [post, settings, house] = await Promise.all([
       prisma.sponsoredPost.findFirst({
         where: { placement: slot, ...livePostFilter() }, orderBy: [{ startsAt: 'desc' }, { id: 'desc' }],
@@ -120,7 +118,7 @@ export const advertisingRoutes: FastifyPluginAsync = async (app) => {
     return { post: { ...post, token: exposureToken(post.id, 'post') } };
   });
 
-  app.post('/api/advertising/event', async (req, reply) => {
+  app.post('/api/advertising/event', { config: { rateLimit: { max: 180 } } }, async (req, reply) => {
     const input = eventSchema.parse(req.body);
     const exposure = readExposureToken(input.token);
     if (!exposure) return reply.code(400).send({ error: 'Недействительный или просроченный показ' });

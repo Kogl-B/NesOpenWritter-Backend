@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 
 import { prisma } from '../lib/prisma.js';
-import { GENRES, expandGenre, genreName } from '../lib/genres.js';
+import { GENRES, genreName } from '../lib/genres.js';
 import { readerReportCreateSchema } from '../lib/schemas.js';
 import { scoreChapters } from '../lib/aiMarks.js';
 import { chapterIsHidden } from '../lib/publish/visibility.js';
@@ -11,8 +13,10 @@ import { countryBlocks, denyCatalogGeo, denyGeo } from '../lib/geo/request.js';
 import { bookDigestKey, bookSubscriptionNotice, commentNotices, digestDay, readerReportNotice } from '../lib/notify/drafts.js';
 import { writeDigest, writeNotices } from '../lib/notify/deliver.js';
 import { coverHref } from '../lib/ai/place.js';
-import { filterCatalogBooks } from '../lib/catalogSearch.js';
+import { homeCatalog, searchAuthors, searchCatalog, suggestBookIds, topCatalog, type CatalogVisibility, type HomeShelf } from '../lib/catalogBrowse.js';
 import { viewerBlocks } from '../lib/viewerBlocks.js';
+import { bookCycle, cycleSettings, inCycleOrder } from '../lib/bookCycles.js';
+import { positionSchema, recentReadingPositions, saveReadingPosition } from '../lib/readingPositions.js';
 import { readerAccessOf } from '../lib/readerAccess.js';
 import { cachedReaderPages, pageHeight, PAGE_WIDTH, readerPages, renderReaderPage } from '../lib/protectedReader.js';
 import { generateEpub } from '../lib/exporters.js';
@@ -47,6 +51,9 @@ export interface BookCard {
   tags: string[];
   status: 'writing' | 'complete' | 'frozen';
   cycle: string;
+  cycleOrder: number | null;
+  cycleBranch: string;
+  cycleEntry: boolean;
   authorNote: string;
   createdAt: string;
   updatedAt: string;
@@ -80,13 +87,17 @@ function metaOf(settings: unknown) {
     tags,
     status: status as BookCard['status'],
     cycle: typeof catalog.cycle === 'string' ? catalog.cycle : '',
+    ...cycleSettings(catalog),
     authorNote: typeof catalog.authorNote === 'string' ? catalog.authorNote : '',
     cover: coverHref(root.cover),
     structure: root.structure === 'chapters' ? 'chapters' as const : 'chapters-scenes' as const,
   };
 }
 
-async function loadBooks(userId: string | null): Promise<BookCard[]> {
+async function loadBooks(userId: string | null, selectedIds?: string[], ownerId?: string): Promise<BookCard[]> {
+  if (selectedIds?.length === 0) return [];
+  const scope = selectedIds ? Prisma.sql`AND p.id = ANY(${selectedIds}::text[])` : Prisma.empty;
+  const owner = ownerId ? Prisma.sql`AND p."ownerId" = ${ownerId}` : Prisma.empty;
   const rows = await prisma.$queryRaw<RawBook[]>`
     SELECT p.id, p.name, p.description, p.settings, p."ownerId",
            u.name AS "authorName", p."createdAt", p."updatedAt",
@@ -97,12 +108,13 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
     JOIN users u ON u.id = p."ownerId"
     LEFT JOIN chapters c ON c."projectId" = p.id
       AND COALESCE(c.metadata->>'public', '') <> 'false'
-    WHERE COALESCE(p.settings #>> '{catalog,published}', '') = 'true'
+    WHERE COALESCE(p.settings #>> '{catalog,published}', '') = 'true' ${scope} ${owner}
     GROUP BY p.id, u.name
   `;
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
-  const [views, mine, subs] = await Promise.all([
+  const cutoff = new Date(Date.now() - 14 * 86_400_000);
+  const [views, mine, subs, reactions] = await Promise.all([
     prisma.bookView.groupBy({ by: ['projectId'], where: { projectId: { in: ids } }, _count: { _all: true } }),
     userId
       ? prisma.bookReaction.findMany({ where: { userId, projectId: { in: ids } } })
@@ -110,23 +122,15 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
     userId
       ? prisma.bookSubscription.findMany({ where: { userId, projectId: { in: ids } }, select: { projectId: true } })
       : Promise.resolve([]),
+    prisma.$queryRaw<Array<{ projectId: string; likes: number; favorites: number; readingNow: number }>>`
+      SELECT "projectId", count(*) FILTER (WHERE liked)::int AS likes,
+             count(*) FILTER (WHERE favorite)::int AS favorites,
+             count(*) FILTER (WHERE "lastReadAt" >= ${cutoff})::int AS "readingNow"
+      FROM book_reactions WHERE "projectId" = ANY(${ids}::text[]) GROUP BY "projectId"
+    `,
   ]);
-  const likeRows = await prisma.bookReaction.findMany({
-    where: { projectId: { in: ids }, OR: [{ liked: true }, { favorite: true }, { lastReadAt: { not: null } }] },
-    select: { projectId: true, liked: true, favorite: true, lastReadAt: true },
-  });
   const viewOf = new Map(views.map((v) => [v.projectId, v._count._all]));
-  const likeOf = new Map<string, number>();
-  const favOf = new Map<string, number>();
-  const readOf = new Map<string, number>();
-  const cutoff = Date.now() - 14 * 86400000;
-  for (const row of likeRows) {
-    if (row.liked) likeOf.set(row.projectId, (likeOf.get(row.projectId) ?? 0) + 1);
-    if (row.favorite) favOf.set(row.projectId, (favOf.get(row.projectId) ?? 0) + 1);
-    if (row.lastReadAt && row.lastReadAt.getTime() >= cutoff) {
-      readOf.set(row.projectId, (readOf.get(row.projectId) ?? 0) + 1);
-    }
-  }
+  const reactionsOf = new Map(reactions.map((row) => [row.projectId, row]));
   const mineOf = new Map(mine.map((m) => [m.projectId, m]));
   const subscribed = new Set(subs.map((row) => row.projectId));
   const blocked = await viewerBlocks(userId);
@@ -145,6 +149,9 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
       tags: meta.tags,
       status: meta.status,
       cycle: meta.cycle,
+      cycleOrder: meta.cycleOrder,
+      cycleBranch: meta.cycleBranch,
+      cycleEntry: meta.cycleEntry,
       authorNote: meta.authorNote,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -152,9 +159,9 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
       words: Number(row.words) || 0,
       chapters: Number(row.chapters) || 0,
       views: viewOf.get(row.id) ?? 0,
-      likes: likeOf.get(row.id) ?? 0,
-      favorites: favOf.get(row.id) ?? 0,
-      readingNow: readOf.get(row.id) ?? 0,
+      likes: reactionsOf.get(row.id)?.likes ?? 0,
+      favorites: reactionsOf.get(row.id)?.favorites ?? 0,
+      readingNow: reactionsOf.get(row.id)?.readingNow ?? 0,
       liked: own?.liked ?? false,
       disliked: own?.disliked ?? false,
       favorite: own?.favorite ?? false,
@@ -168,8 +175,37 @@ async function loadBooks(userId: string | null): Promise<BookCard[]> {
   });
 }
 
-function byDate(value: string): number {
-  return new Date(value).getTime();
+const shortQuery = z.string().max(512).optional();
+const pageQuery = z.coerce.number().int().min(1).max(10_000).default(1);
+const authorSearchQuery = z.object({ q: shortQuery, page: pageQuery });
+const catalogSearchQuery = z.object({
+  q: shortQuery, genre: shortQuery, status: shortQuery, author: shortQuery, tag: shortQuery,
+  excludeTag: shortQuery, cycle: shortQuery, sort: shortQuery, minWords: shortQuery, maxWords: shortQuery,
+  minPages: shortQuery, maxPages: shortQuery, size: shortQuery, updatedDays: shortQuery,
+  page: pageQuery,
+});
+
+async function catalogVisibility(req: FastifyRequest): Promise<CatalogVisibility> {
+  const userId = req.user?.id ?? null;
+  const [blocked, geo] = await Promise.all([viewerBlocks(userId), countryBlocks(req)]);
+  const excluded = new Set(blocked.books);
+  if (geo.country) {
+    for (const [id, countries] of geo.index.books) {
+      if (countries.has(geo.country)) excluded.add(id);
+    }
+  }
+  return { userId, excludedBooks: [...excluded], excludedAuthors: [...blocked.people] };
+}
+
+async function catalogCards(userId: string | null, ids: string[]) {
+  return new Map((await loadBooks(userId, [...new Set(ids)])).map((book) => [book.id, book]));
+}
+
+function orderedCards(ids: string[], cards: Map<string, BookCard>): BookCard[] {
+  return ids.flatMap((id) => {
+    const book = cards.get(id);
+    return book ? [book] : [];
+  });
 }
 
 const commentSchema = z.object({
@@ -310,14 +346,17 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     });
     if (!author) return reply.status(404).send({ error: 'Автор не найден' });
     const viewerId = req.user?.id ?? null;
-    const geo = await countryBlocks(req);
-    const [mineRaw, authoredRaw] = await Promise.all([
-      loadBooks(author.id),
-      loadBooks(viewerId),
+    const [geo, authoredRaw, libraryRows] = await Promise.all([
+      countryBlocks(req),
+      loadBooks(viewerId, undefined, author.id),
+      prisma.bookReaction.findMany({
+        where: { userId: author.id, OR: [{ favorite: true }, { shelf: { not: '' } }] },
+        select: { projectId: true },
+      }),
     ]);
     const keepBook = (book: BookCard) => !bookBlocked(geo.index, geo.country, book.id);
-    const mine = mineRaw.filter(keepBook);
-    const books = authoredRaw.filter((book) => book.authorId === author.id && keepBook(book));
+    const mine = (await loadBooks(author.id, libraryRows.map(row => row.projectId))).filter(keepBook);
+    const books = authoredRaw.filter(keepBook);
     const ids = new Set(books.map((book) => book.id));
     const blocks = await viewerBlocks(viewerId);
     const [posts, comments, followers, following] = await Promise.all([
@@ -432,51 +471,79 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
-  app.get('/api/catalog/home', async (req) => {
-    const books = await hideBooks(req, await loadBooks(req.user?.id ?? null));
-    const take = (list: BookCard[]) => list.slice(0, 12);
-    const fresh = books.filter((b) => Date.now() - byDate(b.createdAt) < 90 * 86400000);
-    const mine = books.filter((b) => b.favorite);
-    // Учитываем долю позитивных действий, сглаживая результат при малом числе просмотров.
-    const score = (book: BookCard) => (book.likes + book.favorites) / (book.views + 20);
-    const recommended = books.filter((book) => book.likes + book.favorites > 0)
-      .sort((a, b) => score(b) - score(a) || b.likes - a.likes || b.views - a.views || a.id.localeCompare(b.id));
+  app.get('/api/catalog/home', { config: { rateLimit: { max: 90 } } }, async (req, reply) => {
+    reply.header('Cache-Control', 'private, no-store');
+    const scope = await catalogVisibility(req);
+    const { recommended, ...shelves } = await homeCatalog(scope, Date.now());
+    const cards = await catalogCards(scope.userId, [recommended, ...Object.values(shelves)].flat());
     return {
-      recommended: take(recommended),
-      shelves: {
-        popular: take([...books].sort((a, b) => b.views - a.views || b.words - a.words)),
-        hot: take((fresh.length ? fresh : books).slice().sort((a, b) => b.views - a.views || byDate(b.createdAt) - byDate(a.createdAt))),
-        updates: take([...books].sort((a, b) => byDate(b.textUpdatedAt) - byDate(a.textUpdatedAt))),
-        bestsellers: take([...books].sort((a, b) => b.likes - a.likes || b.views - a.views || b.words - a.words)),
-        arrivals: take([...books].sort((a, b) => byDate(b.createdAt) - byDate(a.createdAt))),
-        reading: take([...books].sort((a, b) => b.readingNow - a.readingNow || byDate(b.textUpdatedAt) - byDate(a.textUpdatedAt))),
-        liked: take([...books].sort((a, b) => b.likes - a.likes || b.favorites - a.favorites)),
-        favorites: take(mine.length ? mine : [...books].sort((a, b) => b.favorites - a.favorites || b.likes - a.likes)),
-      },
+      recommended: orderedCards(recommended, cards),
+      shelves: Object.fromEntries((Object.entries(shelves) as [HomeShelf, string[]][])
+        .map(([name, ids]) => [name, orderedCards(ids, cards)])),
     };
   });
 
-  app.get<{ Querystring: Record<string, string | undefined> }>('/api/catalog/search', async (req) => {
-    const books = await hideBooks(req, await loadBooks(req.user?.id ?? null));
-    return { books: filterCatalogBooks(books, req.query, expandGenre) };
+  app.get('/api/catalog/search', { config: { rateLimit: { max: 60 } } }, async (req, reply) => {
+    reply.header('Cache-Control', 'private, no-store');
+    const { page, ...query } = catalogSearchQuery.parse(req.query);
+    const scope = await catalogVisibility(req);
+    const { ids, ...result } = await searchCatalog(scope, query, page, Date.now());
+    const cards = await catalogCards(scope.userId, ids);
+    return { ...result, books: orderedCards(ids, cards) };
   });
 
-  app.get('/api/catalog/tops', async (req) => {
-    const books = await hideBooks(req, await loadBooks(req.user?.id ?? null));
-    const authors = new Map<string, { id: string; name: string; books: number; words: number; likes: number; views: number }>();
-    for (const book of books) {
-      const row = authors.get(book.authorId) ?? { id: book.authorId, name: book.authorName, books: 0, words: 0, likes: 0, views: 0 };
-      row.books += 1;
-      row.words += book.words;
-      row.likes += book.likes;
-      row.views += book.views;
-      authors.set(book.authorId, row);
-    }
-    return {
-      authors: [...authors.values()].sort((a, b) => b.likes - a.likes || b.views - a.views || b.words - a.words).slice(0, 30),
-      byLikes: [...books].sort((a, b) => b.likes - a.likes || b.views - a.views || b.words - a.words).slice(0, 30),
-      byViews: [...books].sort((a, b) => b.views - a.views || b.likes - a.likes || b.words - a.words).slice(0, 30),
-    };
+  app.get('/api/catalog/search/authors', { config: { rateLimit: { max: 60 } } }, async (req, reply) => {
+    reply.header('Cache-Control', 'private, no-store');
+    const { q = '', page } = authorSearchQuery.parse(req.query);
+    return searchAuthors(await catalogVisibility(req), q, page);
+  });
+
+  app.get('/api/catalog/suggest', { config: { rateLimit: { max: 120 } } }, async (req, reply) => {
+    reply.header('Cache-Control', 'private, no-store');
+    const { q = '' } = z.object({ q: z.string().trim().max(160).optional() }).parse(req.query);
+    if (Array.from(q.replace(/^@/, '')).length < 2) return { books: [], authors: [] };
+    const scope = await catalogVisibility(req);
+    const [ids, { authors }] = await Promise.all([
+      suggestBookIds(scope, q, Date.now()),
+      searchAuthors(scope, q, 1, 4),
+    ]);
+    const cards = await catalogCards(scope.userId, ids);
+    const books = orderedCards(ids, cards).map(({ id, title, cover, authorName }) => ({
+      id, title, cover: cover.length <= 2048 ? cover : '', authorName,
+    }));
+    return { books, authors };
+  });
+
+  app.get('/api/catalog/continue', async (req, reply) => {
+    app.requireAuth(req);
+    reply.header('Cache-Control', 'private, no-store');
+    const { book } = z.object({ book: z.string().min(1).max(128).optional() }).parse(req.query);
+    const [scope, geo] = await Promise.all([catalogVisibility(req), countryBlocks(req)]);
+    const chapters = [...geo.index.chapters].filter(([, countries]) => geo.country && countries.has(geo.country)).map(([id]) => id);
+    return { positions: await recentReadingPositions(req.user!.id, book, {
+      books: scope.excludedBooks, authors: scope.excludedAuthors, chapters,
+    }) };
+  });
+
+  app.put<{ Params: { id: string } }>('/api/catalog/books/:id/position', { config: { rateLimit: { max: 120 } } }, async (req, reply) => {
+    app.requireAuth(req);
+    const point = positionSchema.parse(req.body);
+    const { id } = req.params;
+    const scope = await publicReading(req, reply, id);
+    if (!scope) return reply;
+    const chapter = await prisma.chapter.findFirst({ where: { id: point.chapterId, projectId: id }, select: { metadata: true } });
+    if (!chapter || chapterIsHidden(chapter.metadata)) return reply.status(404).send({ error: 'Глава недоступна' });
+    if (chapterBlocked(scope.geo.index, scope.geo.country, id, point.chapterId)) return denyGeo(reply);
+    await saveReadingPosition(req.user!.id, id, point);
+    return reply.status(204).send();
+  });
+
+  app.get('/api/catalog/tops', { config: { rateLimit: { max: 90 } } }, async (req, reply) => {
+    reply.header('Cache-Control', 'private, no-store');
+    const scope = await catalogVisibility(req);
+    const { authors, byLikes, byViews } = await topCatalog(scope, Date.now());
+    const cards = await catalogCards(scope.userId, [...byLikes, ...byViews]);
+    return { authors, byLikes: orderedCards(byLikes, cards), byViews: orderedCards(byViews, cards) };
   });
 
   app.get<{ Params: { id: string } }>('/api/catalog/books/:id', async (req, reply) => {
@@ -524,8 +591,15 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
       words: reading.reduce((sum, chapter) => sum + chapter.wordCount, 0),
       chapters: reading.length,
     };
+    const series = bookCycle(book, shelf);
     return {
       book: publicBook,
+      series: series && {
+        ...series,
+        books: series.books.map(({ id, title, cycleOrder, cycleBranch, cycleEntry, shelf }) => ({
+          id, title, cycleOrder, cycleBranch, cycleEntry, shelf,
+        })),
+      },
       chapters: visibleChapters,
       readingChapters: reading,
       comments: visibleComments.map((row) => publicBookComment(row, row.parentId ? parentNames.get(row.parentId) ?? '' : '')),
@@ -596,6 +670,9 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
       chapter: {
         id: chapter.id,
         title: chapter.title,
+        version: createHash('sha256').update(JSON.stringify([
+          scope.access.protectCopy, ...parts.map(part => [part.id, part.updatedAt]),
+        ])).digest('base64url').slice(0, 22),
         ...(pages ? { protectedPages: pages } : whole ? {
           contents: parts.map((part) => publicDirectoryContent(scope.project.settings, part.content)), contentChapterIds: parts.map((part) => part.id),
         } : { content: publicDirectoryContent(scope.project.settings, chapter.content) }),
@@ -909,7 +986,7 @@ function cyclesOf(books: BookCard[]): Array<{ name: string; books: BookCard[] }>
   }
   return [...groups.entries()]
     .sort((a, b) => a[0].localeCompare(b[0], 'ru'))
-    .map(([name, list]) => ({ name, books: list }));
+    .map(([name, list]) => ({ name, books: inCycleOrder(list) }));
 }
 
 async function hideBooks(req: FastifyRequest, books: BookCard[]): Promise<BookCard[]> {

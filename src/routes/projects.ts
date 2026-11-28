@@ -3,6 +3,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../lib/prisma.js';
+import { catalogCyclePatch } from '../lib/bookCycles.js';
 import { getUserPlan } from './account.js';
 import { getTier } from '../lib/tiers.js';
 import { getProjectAccess, toJson } from '../lib/access.js';
@@ -387,7 +388,13 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     // settings — JSON-объект с независимыми разделами (автосейв, структура
     // истории и т.д.): мержим по ключам, чтобы один раздел не затирал другой
     if (input.settings !== undefined || input.name !== undefined) {
+      const value = input.settings?.catalog;
+      const catalog = value && typeof value === 'object' && !Array.isArray(value)
+        ? catalogCyclePatch.parse(value) : undefined;
       const locked = await prisma.$transaction(async (tx) => {
+        if (catalog) {
+          await tx.$queryRaw`SELECT id FROM users WHERE id = ${req.user!.id} FOR UPDATE`;
+        }
         const rows = await tx.$queryRaw<Array<{ name: string; settings: unknown; universeId: string | null; universeName: string | null }>>`
           SELECT name, settings, "universeId", "universeName" FROM projects WHERE id = ${req.params.id} AND "ownerId" = ${req.user!.id} FOR UPDATE
         `;
@@ -398,6 +405,27 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
         const incoming = settingsRecord(withoutPrivateWorldData(input.settings));
         const parts = splitBookSettings(incoming);
         const patch = { ...base, ...(row.universeId ? parts.book : incoming) };
+        if (catalog) {
+          const old = base.catalog && typeof base.catalog === 'object' && !Array.isArray(base.catalog)
+            ? base.catalog as Record<string, unknown> : {};
+          const previousName = typeof old.cycle === 'string' ? old.cycle.trim() : '';
+          const name = typeof catalog.cycle === 'string' ? catalog.cycle.trim() : previousName;
+          const next = { ...old, ...catalog, cycle: name };
+          if (!name || name !== previousName) {
+            next.cycleOrder = name ? catalog.cycleOrder ?? null : null;
+            next.cycleBranch = name ? catalog.cycleBranch ?? '' : '';
+            next.cycleEntry = Boolean(name && catalog.cycleEntry);
+          }
+          patch.catalog = next;
+          if (name && next.cycleEntry === true) {
+            await tx.$executeRaw`
+              UPDATE projects SET settings = jsonb_set(settings, '{catalog,cycleEntry}', 'false'::jsonb)
+              WHERE "ownerId" = ${req.user!.id} AND id <> ${req.params.id}
+                AND btrim(settings #>> '{catalog,cycle}') = ${name}
+                AND settings #> '{catalog,cycleEntry}' = 'true'::jsonb
+            `;
+          }
+        }
         let effectiveWorld: Record<string, unknown> = {};
         if (row.universeId) {
           const worldRows = await tx.$queryRaw<Array<{ settings: unknown }>>`

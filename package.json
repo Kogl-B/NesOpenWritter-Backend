@@ -24,6 +24,7 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "test:advertising": "tsx --test src/routes/advertising.integration.test.ts",
+    "test:public-catalog": "tsx --test src/routes/publicCatalog.integration.test.ts",
     "test:stats": "tsx --test src/routes/metrics.integration.test.ts",
     "test:project-isolation": "tsx --test src/routes/projectIsolation.integration.test.ts",
     "test:drive-isolation": "tsx --test src/lib/driveIsolation.integration.test.ts"
@@ -35,6 +36,7 @@
     "@fastify/cookie": "^11.0.1",
     "@fastify/cors": "^10.0.1",
     "@fastify/helmet": "^13.0.0",
+    "@fastify/rate-limit": "10.3.0",
     "@fastify/sensible": "^6.0.1",
     "@napi-rs/canvas": "1.2.1",
     "@prisma/client": "^5.22.0",
