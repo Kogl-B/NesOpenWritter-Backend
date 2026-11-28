@@ -53,6 +53,8 @@ model User {
   blogComments BlogComment[]
   blogLikes    BlogLike[]
   blogReports  BlogReport[]
+  blogSuggestionLimitsOut BlogSuggestionLimit[] @relation("SuggestionReader")
+  blogSuggestionLimitsIn  BlogSuggestionLimit[] @relation("SuggestionAuthor")
   blogDonations BlogDonation[]
   blogModerations BlogModerator[]
   aiUsages     AiUsage[]
@@ -82,6 +84,7 @@ model BlogProfile {
   description          String @default("")
   defaultAudience      String @default("all")
   defaultCommentAccess String @default("all")
+  appearance           Json   @default("{}")
 
   author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
 
@@ -279,7 +282,23 @@ model BlogReport {
   @@index([postId])
   @@index([createdAt, id])
   @@index([kind, status, createdAt])
+  @@index([userId, kind, createdAt])
   @@map("blog_reports")
+}
+
+model BlogSuggestionLimit {
+  readerId     String
+  authorId     String
+  blockedUntil DateTime?
+  requestedAt  DateTime?
+  resetAt      DateTime?
+
+  reader User @relation("SuggestionReader", fields: [readerId], references: [id], onDelete: Cascade)
+  author User @relation("SuggestionAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@id([readerId, authorId])
+  @@index([authorId, blockedUntil])
+  @@map("blog_suggestion_limits")
 }
 
 model BlogDonation {

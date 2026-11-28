@@ -1,4 +1,5 @@
 import sanitizeHtml from 'sanitize-html';
+import { blogAppearanceSchema, readBlogAppearance } from '../lib/blogAppearance.js';
 import { Prisma } from '@prisma/client';
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -25,6 +26,9 @@ import { activeAuthors, buyAuthorSubscription, cancellationReasons, changeAuthor
 import { lockWallets } from '../lib/wallet.js';
 import { blogEarnings, earningsActivities, earningsListQuery, earningsPeriod, earningsSubscribers, exportBlogEarnings } from '../lib/blogEarnings.js';
 import { requireAdmin } from '../lib/accountStatus.js';
+
+import { readSuggestionLimit, updateSuggestionLimit, withSuggestionPair } from '../lib/blogSuggestionLimits.js';
+import { maxSuggestions, suggestionDayMs } from '../lib/blogSuggestionPolicy.js';
 
 const reactionEmoji = z.enum(['like', 'heart', 'fire', 'clap', 'smile', 'book']);
 type Reaction = z.infer<typeof reactionEmoji>;
@@ -73,11 +77,16 @@ const blogProfileSchema = z.object({
   description: z.string().trim().max(1000),
   defaultAudience: z.enum(['all', 'subscribers', 'self']),
   defaultCommentAccess: z.enum(['all', 'subscribers', 'none']),
+  appearance: blogAppearanceSchema.optional(),
 });
 
 const subscriptionSchema = z.object({ levelId: z.string().min(1).max(80).nullable() });
 const trafficSource = z.enum(['direct', 'site', 'search', 'social', 'external', 'unknown']);
-const blogProfileSelect = { nickname: true, title: true, description: true, defaultAudience: true, defaultCommentAccess: true } as const;
+const blogProfileSelect = { nickname: true, title: true, description: true, defaultAudience: true, defaultCommentAccess: true, appearance: true } as const;
+function blogProfileView(profile: Prisma.BlogProfileGetPayload<{ select: typeof blogProfileSelect }>) {
+  return { ...profile, nickname: profile.nickname ?? '', appearance: readBlogAppearance(profile.appearance) };
+}
+
 const publishedOrder: Prisma.BlogPostOrderByWithRelationInput[] = [
   { publishedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }, { id: 'desc' },
 ];
@@ -452,7 +461,7 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Params: { authorId: string }; Querystring: { posts?: string } }>('/api/blog/authors/:authorId', async (req) => {
     const author = await prisma.user.findUnique({
       where: { id: req.params.authorId },
-      select: { id: true, name: true, blogProfile: { select: { nickname: true, title: true, description: true } } },
+      select: { id: true, name: true, blogProfile: { select: { nickname: true, title: true, description: true, appearance: true } } },
     });
     if (!author) return { author: null, levels: [], posts: [], following: false, subscribedLevelId: null, followers: 0 };
     const [levels, followers, follow, sub, posts] = await Promise.all([
@@ -469,6 +478,7 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
         nickname: author.blogProfile?.nickname ?? '',
         title: author.blogProfile?.title ?? '',
         description: author.blogProfile?.description ?? '',
+        appearance: readBlogAppearance(author.blogProfile?.appearance),
       },
       posts,
       followers,
@@ -737,20 +747,120 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(204).send();
   });
 
+  async function visibleFeedbackPost(id: string, userId: string) {
+    const post = await prisma.blogPost.findFirst({
+      where: { id, published: true },
+      select: { id: true, authorId: true, title: true, audience: true },
+    });
+    return post && await visibleToViewer(post, userId) ? post : null;
+  }
+
+  app.get<{ Params: { id: string } }>('/api/blog/:id/suggestion-limit', async (req, reply) => {
+    app.requireAuth(req);
+    const readerId = req.user!.id;
+    const post = await visibleFeedbackPost(req.params.id, readerId);
+    if (!post) return reply.status(404).send({ error: 'Запись не найдена' });
+    const pair = { readerId, authorId: post.authorId };
+    const { status } = await withSuggestionPair(pair, (tx, now) => readSuggestionLimit(tx, pair, now));
+    return reply.header('Cache-Control', 'no-store').send(status);
+  });
+
+  app.post<{ Params: { id: string } }>('/api/blog/:id/suggestion-limit/request', async (req, reply) => {
+    app.requireAuth(req);
+    const readerId = req.user!.id;
+    const post = await visibleFeedbackPost(req.params.id, readerId);
+    if (!post) return reply.status(404).send({ error: 'Запись не найдена' });
+    const pair = { readerId, authorId: post.authorId };
+    const result = await withSuggestionPair(pair, async (tx, now) => {
+      const { status } = await readSuggestionLimit(tx, pair, now);
+      if (status.stage !== 'blocked' || !status.retryAt) return null;
+      if (!status.requested) {
+        await updateSuggestionLimit(tx, pair, { blockedUntil: new Date(status.retryAt), requestedAt: now });
+      }
+      return { status: { ...status, requested: true }, requestedAt: status.requested ? null : now };
+    });
+    if (!result) return reply.status(409).send({ error: 'Лимит уже доступен' });
+    if (result.requestedAt) await writeNotices([{
+      userId: pair.authorId,
+      kind: 'blog_report',
+      title: 'Читатель просит снять лимит предложений',
+      body: 'Запрос можно одобрить в кабинете блога.',
+      href: '/account?section=blog&blogTab=suggestions',
+      eventKey: `suggestion-unlock:${readerId}:${result.requestedAt.toISOString()}`,
+    }]);
+    return result.status;
+  });
+
+  app.get('/api/me/blog/suggestion-requests', async (req, reply) => {
+    app.requireAuth(req);
+    const rows = await prisma.blogSuggestionLimit.findMany({
+      where: { authorId: req.user!.id, requestedAt: { not: null }, blockedUntil: { gt: new Date() } },
+      orderBy: { requestedAt: 'desc' },
+      select: { readerId: true, reader: { select: { name: true } }, requestedAt: true, blockedUntil: true },
+    });
+    return reply.header('Cache-Control', 'no-store').send({
+      requests: rows.map(({ reader, ...row }) => ({ ...row, name: reader.name || 'Читатель' })),
+    });
+  });
+
+  app.post<{ Params: { readerId: string } }>('/api/me/blog/suggestion-requests/:readerId/approve', async (req, reply) => {
+    app.requireAuth(req);
+    const pair = { authorId: req.user!.id, readerId: req.params.readerId };
+    const approved = await withSuggestionPair(pair, async (tx, now) => {
+      const result = await tx.blogSuggestionLimit.updateMany({
+        where: { ...pair, requestedAt: { not: null }, blockedUntil: { gt: now } },
+        data: { requestedAt: null, blockedUntil: null, resetAt: now },
+      });
+      return result.count ? now : null;
+    });
+    if (!approved) return reply.status(404).send({ error: 'Активный запрос не найден' });
+    await writeNotices([{
+      userId: pair.readerId,
+      kind: 'blog_report',
+      title: 'Автор снял лимит предложений',
+      body: 'Можно снова отправлять предложения этому автору.',
+      href: `/authors/${encodeURIComponent(pair.authorId)}/blog`,
+      eventKey: `suggestion-approved:${pair.authorId}:${approved.toISOString()}`,
+    }]);
+    return reply.status(204).send();
+  });
+
   app.post<{ Params: { id: string } }>('/api/blog/:id/report', async (req, reply) => {
     app.requireAuth(req);
     const input = z.object({ note: z.string().trim().min(1).max(1000), kind: feedbackKind.default('complaint') }).parse(req.body);
-    const post = await prisma.blogPost.findFirst({
-      where: { id: req.params.id, published: true },
-      select: { id: true, authorId: true, title: true, audience: true },
-    });
-    if (!post || !await visibleToViewer(post, req.user!.id)) return reply.status(404).send({ error: 'Запись не найдена' });
-    const report = await prisma.blogReport.create({
-      data: { postId: post.id, postTitle: post.title, userId: req.user!.id, ...input },
-    });
-    if (input.kind === 'complaint') await writeNotices(blogReportNotice({
+    const readerId = req.user!.id;
+    const post = await visibleFeedbackPost(req.params.id, readerId);
+    if (!post) return reply.status(404).send({ error: 'Запись не найдена' });
+    const data = { postId: post.id, postTitle: post.title, userId: readerId, ...input };
+
+    if (input.kind === 'suggestion') {
+      const pair = { readerId, authorId: post.authorId };
+      const limited = await withSuggestionPair(pair, async (tx, now) => {
+        const { status, count } = await readSuggestionLimit(tx, pair, now);
+        if (status.stage !== 'available') return status;
+        await tx.blogReport.create({ data: { ...data, createdAt: now } });
+        if (count + 1 === maxSuggestions) {
+          await updateSuggestionLimit(tx, pair, { blockedUntil: new Date(now.getTime() + suggestionDayMs), requestedAt: null });
+        }
+        return null;
+      });
+      if (limited) {
+        if (limited.retryAt) {
+          reply.header('Retry-After', Math.max(1, Math.ceil((Date.parse(limited.retryAt) - Date.now()) / 1000)));
+        }
+        return reply.status(429).send({
+          code: 'BLOG_SUGGESTION_LIMIT',
+          error: limited.stage === 'blocked' ? 'Лимит предложений исчерпан' : 'Следующее предложение пока недоступно',
+          details: limited,
+        });
+      }
+      return reply.status(201).send({ ok: true });
+    }
+
+    const report = await prisma.blogReport.create({ data });
+    await writeNotices(blogReportNotice({
       authorId: post.authorId,
-      actorId: req.user!.id,
+      actorId: readerId,
       postId: post.id,
       postTitle: post.title,
       reportId: report.id,
@@ -863,7 +973,7 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
     return {
       posts: posts.map((post) => card(post, { liked: liked.has(post.id), own: true })),
       stats,
-      profile: profile ? { ...profile, nickname: profile.nickname ?? '' } : null,
+      profile: profile ? blogProfileView(profile) : null,
       levels: levels.map((level) => ({
         id: level.id,
         title: level.title,
@@ -922,7 +1032,7 @@ export const blogRoutes: FastifyPluginAsync = async (app) => {
         update: data,
         select: blogProfileSelect,
       });
-      return { profile: { ...profile, nickname: profile.nickname ?? '' } };
+      return { profile: blogProfileView(profile) };
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         return reply.status(409).send({ error: 'Этот ник уже занят' });
