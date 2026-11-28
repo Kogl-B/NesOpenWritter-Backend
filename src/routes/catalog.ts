@@ -25,6 +25,8 @@ import { projectFootnotes, footnoteLines } from '../lib/footnoteText.js';
 import { directoryCard, directoryId, findDirectoryReference, publicDirectoryContent } from '../lib/worldDirectory.js';
 import { captureError } from '../lib/sentry.js';
 import { blockedAutomation, ROBOTS_TAG } from '../lib/botPolicy.js';
+import { bookOfferOf, bookOfferSchema, type BookOffer } from '../lib/bookOffer.js';
+import { allowedBookEmoji, bookEmoji, bookEmojiChoices, type BookEmoji } from '../lib/bookEmoji.js';
 
 interface RawBook {
   id: string;
@@ -74,6 +76,7 @@ export interface BookCard {
   structure: 'chapters' | 'chapters-scenes';
   protectCopy: boolean;
   allowDownload: boolean;
+  offer?: BookOffer;
 }
 
 function metaOf(settings: unknown) {
@@ -138,6 +141,7 @@ async function loadBooks(userId: string | null, selectedIds?: string[], ownerId?
     const meta = metaOf(row.settings);
     const own = mineOf.get(row.id);
     const textAt = row.textUpdatedAt ?? row.updatedAt;
+    const offer = bookOfferOf(row.settings);
     return {
       id: row.id,
       title: row.name,
@@ -171,6 +175,7 @@ async function loadBooks(userId: string | null, selectedIds?: string[], ownerId?
       cover: meta.cover,
       structure: meta.structure,
       ...readerAccessOf(row.settings),
+      ...(offer && { offer }),
     };
   });
 }
@@ -266,6 +271,25 @@ function readerFailure(req: FastifyRequest, reply: FastifyReply, err: unknown, p
   req.log.error({ err, ...context }, 'Не удалось отобразить защищённую главу');
   captureError(err, context);
   return reply.status(503).send({ error: 'Не удалось открыть защищённую главу.' });
+}
+
+async function bookEmojiState(db: Pick<typeof prisma, '$queryRaw'>, projectId: string, settings: unknown, userId?: string) {
+  const allowed = allowedBookEmoji(settings);
+  const rows = allowed.length ? await db.$queryRaw<Array<{ emoji: BookEmoji; count: number; mine: boolean }>>`
+    SELECT emoji, count(*)::int AS count, bool_or("userId" = ${userId ?? ''}) AS mine
+    FROM book_emoji_reactions WHERE "projectId" = ${projectId}
+    GROUP BY emoji
+  ` : [];
+  const byEmoji = new Map(rows.map((row) => [row.emoji, row]));
+  return { allowed, counts: allowed.map((emoji) => ({ emoji, count: byEmoji.get(emoji)?.count ?? 0 })),
+    selected: allowed.find((emoji) => byEmoji.get(emoji)?.mine) ?? null };
+}
+
+async function lockReactionBook(tx: Pick<typeof prisma, '$queryRaw'>, id: string) {
+  const [row] = await tx.$queryRaw<Array<{ ownerId: string; settings: unknown }>>`
+    SELECT "ownerId", settings FROM projects WHERE id = ${id} FOR UPDATE
+  `;
+  return row && metaPublished(row.settings) ? row : null;
 }
 
 function readingChapters<T extends { id: string; kind: string; parentId: string | null }>(rows: T[]) {
@@ -471,16 +495,99 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
-  app.get('/api/catalog/home', { config: { rateLimit: { max: 90 } } }, async (req, reply) => {
+  app.get<{ Querystring: { limit?: string; include?: string } }>('/api/catalog/home', { config: { rateLimit: { max: 90 } } }, async (req, reply) => {
     reply.header('Cache-Control', 'private, no-store');
     const scope = await catalogVisibility(req);
-    const { recommended, ...shelves } = await homeCatalog(scope, Date.now());
+    const requested = Number(req.query.limit);
+    const limit = Number.isInteger(requested) && requested > 0 ? Math.min(requested, 25) : 12;
+    const { recommended, ...shelves } = await homeCatalog(scope, Date.now(), limit);
+    const widgets = req.query.include === 'widgets'
+      ? await homeWidgets(req, await hideBooks(req, await loadBooks(scope.userId)))
+      : undefined;
     const cards = await catalogCards(scope.userId, [recommended, ...Object.values(shelves)].flat());
     return {
       recommended: orderedCards(recommended, cards),
+      ...(widgets && { widgets }),
       shelves: Object.fromEntries((Object.entries(shelves) as [HomeShelf, string[]][])
         .map(([name, ids]) => [name, orderedCards(ids, cards)])),
     };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/catalog/books/:id/offer', async (req, reply) => {
+    const project = await prisma.project.findUnique({ where: { id: req.params.id }, select: { settings: true, ownerId: true } });
+    if (!project || !metaPublished(project.settings)) return reply.status(404).send({ error: 'Книга не опубликована' });
+    const own = req.user?.id === project.ownerId;
+    if (!own) {
+      const [geo, blocks] = await Promise.all([countryBlocks(req), viewerBlocks(req.user?.id ?? null)]);
+      if (bookBlocked(geo.index, geo.country, req.params.id)) return denyGeo(reply);
+      if (blocks.books.has(req.params.id) || blocks.people.has(project.ownerId)) return reply.status(404).send({ error: 'Книга не найдена' });
+    }
+    return reply.header('Cache-Control', 'private, no-store').send({ offer: bookOfferOf(project.settings, own) });
+  });
+
+  app.get<{ Params: { id: string } }>('/api/catalog/books/:id/reactions', async (req, reply) => {
+    const scope = await publicReading(req, reply, req.params.id);
+    if (!scope) return reply;
+    return bookEmojiState(prisma, req.params.id, scope.project.settings, req.user?.id);
+  });
+
+  app.put<{ Params: { id: string } }>('/api/catalog/books/:id/reactions', async (req, reply) => {
+    app.requireAuth(req);
+    const { emoji } = z.object({ emoji: bookEmoji.nullable() }).strict().parse(req.body);
+    const id = req.params.id;
+    const userId = req.user!.id;
+    if (!await publicReading(req, reply, id)) return reply;
+    const state = await prisma.$transaction(async (tx) => {
+      const book = await lockReactionBook(tx, id);
+      if (!book) return 'missing';
+      if (emoji && !allowedBookEmoji(book.settings).includes(emoji)) return 'disabled';
+      if (emoji) {
+        await tx.$executeRaw`
+          INSERT INTO book_emoji_reactions ("userId", "projectId", emoji) VALUES (${userId}, ${id}, ${emoji})
+          ON CONFLICT ("userId", "projectId") DO UPDATE SET emoji = EXCLUDED.emoji
+        `;
+      } else {
+        await tx.$executeRaw`DELETE FROM book_emoji_reactions WHERE "userId" = ${userId} AND "projectId" = ${id}`;
+      }
+      return bookEmojiState(tx, id, book.settings, userId);
+    });
+    if (state === 'missing') return reply.status(404).send({ error: 'Книга не опубликована' });
+    if (state === 'disabled') return reply.status(409).send({ error: 'Автор отключил эту реакцию' });
+    return state;
+  });
+
+  app.put<{ Params: { id: string } }>('/api/catalog/books/:id/reactions/settings', async (req, reply) => {
+    app.requireAuth(req);
+    const { allowed } = z.object({ allowed: bookEmojiChoices }).strict().parse(req.body);
+    const id = req.params.id;
+    const userId = req.user!.id;
+    if (!await publicReading(req, reply, id)) return reply;
+    const state = await prisma.$transaction(async (tx) => {
+      const book = await lockReactionBook(tx, id);
+      if (!book || book.ownerId !== userId) return null;
+      await tx.$executeRaw`
+        UPDATE projects SET settings = settings || jsonb_build_object('bookEmojiChoices', ${JSON.stringify(allowed)}::jsonb)
+        WHERE id = ${id}
+      `;
+      return bookEmojiState(tx, id, { bookEmojiChoices: allowed }, userId);
+    });
+    return state ?? reply.status(404).send({ error: 'Опубликованная книга владельца не найдена' });
+  });
+
+  app.put<{ Params: { id: string } }>('/api/catalog/books/:id/offer', async (req, reply) => {
+    app.requireAuth(req);
+    const { offer } = z.object({ offer: bookOfferSchema.nullable() }).strict().parse(req.body);
+    if (offer && Date.parse(offer.expiresAt) <= Date.now()) return reply.status(400).send({ error: 'Укажите срок окончания в будущем' });
+    const owner = req.user!.id;
+    const id = req.params.id;
+    const changed = await prisma.$executeRaw`
+      UPDATE projects SET settings = CASE WHEN ${offer !== null}
+        THEN settings || jsonb_build_object('bookOffer', ${JSON.stringify(offer)}::jsonb)
+        ELSE settings - 'bookOffer' END
+      WHERE id = ${id} AND "ownerId" = ${owner} AND settings #>> '{catalog,published}' = 'true'
+    `;
+    if (!changed) return reply.status(404).send({ error: 'Опубликованная книга владельца не найдена' });
+    return { offer };
   });
 
   app.get('/api/catalog/search', { config: { rateLimit: { max: 60 } } }, async (req, reply) => {
@@ -993,6 +1100,46 @@ async function hideBooks(req: FastifyRequest, books: BookCard[]): Promise<BookCa
   const geo = await countryBlocks(req);
   if (!geo.country) return books;
   return books.filter((book) => !bookBlocked(geo.index, geo.country, book.id));
+}
+
+async function homeWidgets(req: FastifyRequest, books: BookCard[]) {
+  const viewer = req.user?.id;
+  const ids = books.map((book) => book.id);
+  const byId = new Map(books.map((book) => [book.id, book]));
+  const [blocks, geo, progress] = await Promise.all([
+    viewerBlocks(viewer ?? null),
+    countryBlocks(req),
+    viewer && ids.length ? prisma.readProgress.findMany({
+      where: { userId: viewer, projectId: { in: ids } },
+      distinct: ['projectId'],
+      orderBy: { updatedAt: 'desc' },
+      take: 16,
+      select: {
+        projectId: true, percent: true,
+        chapter: { select: { id: true, title: true, metadata: true, projectId: true } },
+      },
+    }) : [],
+  ]);
+  const comments = ids.length ? await prisma.bookComment.findMany({
+    where: { projectId: { in: ids }, chapterId: '', userId: { notIn: [...blocks.people] } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: 6,
+    select: { id: true, projectId: true, authorName: true, body: true, createdAt: true },
+  }) : [];
+  return {
+    continueReading: progress.flatMap(({ projectId, chapter, percent }) => {
+      const book = byId.get(projectId);
+      if (!book || chapter.projectId !== projectId || chapterIsHidden(chapter.metadata)
+        || chapterBlocked(geo.index, geo.country, projectId, chapter.id)) return [];
+      return [{ book, chapterId: chapter.id, chapterTitle: chapter.title, percent }];
+    }).slice(0, 8),
+    offers: books.filter((book) => book.offer)
+      .sort((a, b) => Date.parse(a.offer!.expiresAt) - Date.parse(b.offer!.expiresAt) || a.id.localeCompare(b.id)).slice(0, 5),
+    comments: comments.map(({ projectId, authorName, body, ...comment }) => ({
+      ...comment, bookId: projectId, bookTitle: byId.get(projectId)!.title,
+      authorName: authorName || 'Читатель', excerpt: body.replace(/\s+/g, ' ').trim().slice(0, 160),
+    })),
+  };
 }
 
 function metaPublished(settings: unknown): boolean {

@@ -61,6 +61,7 @@ model User {
   errorReports AppErrorReport[]
   readProgress ReadProgress[]
   readingPositions ReadingPosition[]
+  bookEmojiReactions BookEmojiReaction[]
   bookSubscriptions BookSubscription[]
   chapterRevisions ChapterRevision[]
   publishAccounts  PublishAccount[]
@@ -517,6 +518,7 @@ model Project {
   calculators         Calculator[]
   characterLedger     CharacterLedger[]
   bookSubscriptions   BookSubscription[]
+  bookEmojiReactions  BookEmojiReaction[]
   readerNotices       ReaderNotice[]
   publishLinks        PublishLink[]
   storedFiles         StoredFile[]
@@ -1334,6 +1336,19 @@ model BookReaction {
   @@index([projectId, liked])
   @@index([projectId, lastReadAt])
   @@map("book_reactions")
+}
+
+model BookEmojiReaction {
+  userId    String
+  projectId String
+  emoji     String
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([userId, projectId])
+  @@index([projectId, emoji])
+  @@map("book_emoji_reactions")
 }
 
 /// Отметка «подписан на эту книгу». Деньги не списывает.

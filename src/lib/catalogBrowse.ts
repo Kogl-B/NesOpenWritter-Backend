@@ -250,26 +250,26 @@ export async function searchAuthors(scope: CatalogVisibility, query: string, pag
 export type HomeShelf = 'popular' | 'hot' | 'updates' | 'bestsellers' | 'arrivals' | 'reading' | 'liked' | 'favorites';
 type HomeIds = Record<HomeShelf | 'recommended', string[]>;
 
-export async function homeCatalog(scope: CatalogVisibility, now: number): Promise<HomeIds> {
+export async function homeCatalog(scope: CatalogVisibility, now: number, limit = 12): Promise<HomeIds> {
   const recent = new Date(now - 90 * DAY);
   const [row] = await prisma.$queryRaw<HomeIds[]>`
     ${browse(scope, now)}
     SELECT
       ARRAY(SELECT id FROM ranked WHERE likes + favorites > 0
-        ORDER BY (likes + favorites)::double precision / (views + 20) DESC, likes DESC, views DESC, id LIMIT 12) AS recommended,
-      ARRAY(SELECT id FROM ranked ORDER BY views DESC, words DESC, id LIMIT 12) AS popular,
+        ORDER BY (likes + favorites)::double precision / (views + 20) DESC, likes DESC, views DESC, id LIMIT ${limit}) AS recommended,
+      ARRAY(SELECT id FROM ranked ORDER BY views DESC, words DESC, id LIMIT ${limit}) AS popular,
       ARRAY(SELECT id FROM ranked WHERE "createdAt" > ${recent} OR NOT EXISTS (
         SELECT 1 FROM ranked WHERE "createdAt" > ${recent}
-      ) ORDER BY views DESC, "createdAt" DESC, id LIMIT 12) AS hot,
-      ARRAY(SELECT id FROM ranked ORDER BY "textUpdatedAt" DESC, id LIMIT 12) AS updates,
-      ARRAY(SELECT id FROM ranked ORDER BY likes DESC, views DESC, words DESC, id LIMIT 12) AS bestsellers,
-      ARRAY(SELECT id FROM ranked ORDER BY "createdAt" DESC, id LIMIT 12) AS arrivals,
-      ARRAY(SELECT id FROM ranked ORDER BY "readingNow" DESC, "textUpdatedAt" DESC, id LIMIT 12) AS reading,
-      ARRAY(SELECT id FROM ranked ORDER BY likes DESC, favorites DESC, id LIMIT 12) AS liked,
+      ) ORDER BY views DESC, "createdAt" DESC, id LIMIT ${limit}) AS hot,
+      ARRAY(SELECT id FROM ranked ORDER BY "textUpdatedAt" DESC, id LIMIT ${limit}) AS updates,
+      ARRAY(SELECT id FROM ranked ORDER BY likes DESC, views DESC, words DESC, id LIMIT ${limit}) AS bestsellers,
+      ARRAY(SELECT id FROM ranked ORDER BY "createdAt" DESC, id LIMIT ${limit}) AS arrivals,
+      ARRAY(SELECT id FROM ranked ORDER BY "readingNow" DESC, "textUpdatedAt" DESC, id LIMIT ${limit}) AS reading,
+      ARRAY(SELECT id FROM ranked ORDER BY likes DESC, favorites DESC, id LIMIT ${limit}) AS liked,
       ARRAY(SELECT id FROM ranked WHERE "myFavorite" OR NOT EXISTS (
         SELECT 1 FROM ranked WHERE "myFavorite"
       ) ORDER BY CASE WHEN "myFavorite" THEN 0 ELSE favorites END DESC,
-        CASE WHEN "myFavorite" THEN 0 ELSE likes END DESC, id LIMIT 12) AS favorites
+        CASE WHEN "myFavorite" THEN 0 ELSE likes END DESC, id LIMIT ${limit}) AS favorites
   `;
   return row!;
 }
