@@ -1,3 +1,4 @@
+import { settingsRecord, splitBookSettings, universeProjectId } from '../lib/universe.js';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
@@ -60,12 +61,14 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     // собственные + проекты, куда пользователя пригласили коллаборатором
     const projects = await prisma.project.findMany({
       where: {
+        universeId: null,
         OR: [
           { ownerId: req.user!.id },
           { ProjectCollaborator: { some: { userId: req.user!.id, status: 'active' } } },
         ],
       },
       orderBy: { updatedAt: 'desc' },
+      include: { _count: { select: { books: true } } },
     });
     // роль текущего пользователя в каждом проекте (для read-only режима Читателя)
     const collabs = await prisma.projectCollaborator.findMany({
@@ -74,10 +77,13 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     });
     const roleByProject = new Map(collabs.map((c) => [c.projectId, c.role]));
     return {
-      projects: projects.map((p) => {
-        const myRole = p.ownerId === req.user!.id ? 'owner' : roleByProject.get(p.id) ?? 'viewer';
-        return { ...p, myRole, settings: withoutPrivateWorldData(p.settings) };
-      }),
+      projects: projects.map((p) => ({
+        ...p,
+        settings: withoutPrivateWorldData(p.settings),
+        universeName: p.universeName ?? p.name,
+        bookCount: 1 + p._count.books,
+        myRole: p.ownerId === req.user!.id ? 'owner' : roleByProject.get(p.id) ?? 'viewer',
+      })),
     };
   });
 
@@ -91,7 +97,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     // Лимит проектов по тарифу подписки пользователя (tiers.ts); null = безлимит
     const tier = getTier(await getUserPlan(req.user!.id));
     if (tier.projectLimit != null) {
-      const owned = await prisma.project.count({ where: { ownerId: req.user!.id } });
+      const owned = await prisma.project.count({ where: { ownerId: req.user!.id, universeId: null } });
       if (owned >= tier.projectLimit) {
         return reply.status(403).send({
           error: `Достигнут лимит тарифа «${tier.name}»: ${tier.projectLimit} проектов. Освободите слот (удалите проект) или смените тариф в личном кабинете.`,
@@ -102,32 +108,72 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
       data: {
         ownerId: req.user!.id,
         name: input.name,
+        universeName: input.name,
         description: input.description ?? null,
-        settings: toJson(withoutPrivateWorldData(input.settings) as Record<string, unknown> | undefined),
+        settings: toJson(settingsRecord(withoutPrivateWorldData(input.settings))),
       },
     });
     return reply.status(201).send({ project });
   });
 
   app.get<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
-    const project = await prisma.project.findFirst({
-      where: {
-        id: req.params.id,
-        OR: [
-          { ownerId: req.user!.id },
-          { ProjectCollaborator: { some: { userId: req.user!.id, status: 'active' } } },
-        ],
-      },
+    const myRole = await getProjectAccess(req.params.id, req.user!.id);
+    if (!myRole) return reply.status(404).send({ error: 'Project not found' });
+    const project = await prisma.project.findUnique({
+      where: { id: req.params.id },
+      include: { universe: { select: { name: true, universeName: true, settings: true } } },
     });
     if (!project) return reply.status(404).send({ error: 'Project not found' });
-    // роль текущего пользователя (для read-only режима Читателя)
-    const myRole = project.ownerId === req.user!.id
-      ? 'owner'
-      : (await prisma.projectCollaborator.findFirst({
-          where: { projectId: project.id, userId: req.user!.id, status: 'active' },
-          select: { role: true },
-        }))?.role ?? 'viewer';
-    return { project: { ...project, myRole, settings: withoutPrivateWorldData(project.settings) } };
+    const { universe, ...book } = project;
+    return { project: {
+      ...book,
+      myRole,
+      universeName: universe?.universeName ?? universe?.name ?? book.universeName ?? book.name,
+      settings: withoutPrivateWorldData(universe ? { ...splitBookSettings(universe.settings).world, ...splitBookSettings(book.settings).book } : book.settings),
+    } };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/projects/:id/books', async (req, reply) => {
+    if (!(await getProjectAccess(req.params.id, req.user!.id))) {
+      return reply.status(404).send({ error: 'Проект не найден' });
+    }
+    const selected = await prisma.project.findUnique({ where: { id: req.params.id }, select: { id: true, universeId: true } });
+    if (!selected) return reply.status(404).send({ error: 'Проект не найден' });
+    const universeId = selected.universeId ?? selected.id;
+    const universe = await prisma.project.findUnique({
+      where: { id: universeId },
+      select: {
+        id: true, name: true, universeName: true, settings: true,
+        books: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, name: true, settings: true } },
+      },
+    });
+    if (!universe) return reply.status(404).send({ error: 'Проект не найден' });
+    return {
+      id: universe.id, name: universe.universeName ?? universe.name,
+      books: [universe, ...universe.books].map(({ id, name, settings }) => ({
+        id, name, structure: settingsRecord(settings).structure === 'chapters' ? 'chapters' : 'chapters-scenes',
+      })),
+    };
+  });
+
+  app.post<{ Params: { id: string } }>('/api/projects/:id/books', async (req, reply) => {
+    const requested = await prisma.project.findFirst({
+      where: { id: req.params.id, ownerId: req.user!.id },
+      select: { id: true, universeId: true },
+    });
+    if (!requested) return reply.status(404).send({ error: 'Проект не найден' });
+    const input = z.object({
+      name: z.string().trim().min(1).max(200),
+      structure: z.enum(['chapters-scenes', 'chapters']).default('chapters-scenes'),
+    }).parse(req.body);
+    const book = await prisma.project.create({
+      data: {
+        ownerId: req.user!.id, universeId: requested.universeId ?? requested.id,
+        name: input.name, settings: { structure: input.structure },
+      },
+      select: { id: true, name: true },
+    });
+    return reply.status(201).send({ book });
   });
 
   app.get<{ Params: { id: string } }>('/api/projects/:id/manuscript-directory', async (req, reply) => {
@@ -329,7 +375,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
       const chronology = timelineSettingsSchema.parse(input.settings.timelineAnalysis);
       if (chronology.calendarId) {
         const calendar = await prisma.calendar.findFirst({
-          where: { id: chronology.calendarId, projectId: req.params.id },
+          where: { id: chronology.calendarId, projectId: await universeProjectId(req.params.id) },
           select: { monthsPerYear: true, daysPerMonth: true, settings: true },
         });
         if (!calendar || !validTimelineStart(chronology.start, calendar)) {
@@ -340,31 +386,45 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     }
     // settings — JSON-объект с независимыми разделами (автосейв, структура
     // истории и т.д.): мержим по ключам, чтобы один раздел не затирал другой
-    if (input.settings !== undefined) {
+    if (input.settings !== undefined || input.name !== undefined) {
       const locked = await prisma.$transaction(async (tx) => {
-        const rows = await tx.$queryRaw<Array<{ settings: unknown }>>`
-          SELECT settings FROM projects WHERE id = ${req.params.id} AND "ownerId" = ${req.user!.id} FOR UPDATE
+        const rows = await tx.$queryRaw<Array<{ name: string; settings: unknown; universeId: string | null; universeName: string | null }>>`
+          SELECT name, settings, "universeId", "universeName" FROM projects WHERE id = ${req.params.id} AND "ownerId" = ${req.user!.id} FOR UPDATE
         `;
         const row = rows[0];
         if (!row) return null;
         const previous = catalogStatus(row.settings);
-        const base = row.settings && typeof row.settings === 'object' && !Array.isArray(row.settings)
-          ? row.settings as Record<string, unknown>
-          : {};
-        const incoming = withoutPrivateWorldData(input.settings) as Record<string, unknown>;
-        const patch: Record<string, unknown> = { ...base, ...incoming };
-        if ('worldTables' in incoming) {
-          patch.worldTables = preserveWorldReaderRules(base.worldTables, mergeWorldTablePhotos(base.worldTables, incoming.worldTables));
+        const base = settingsRecord(row.settings);
+        const incoming = settingsRecord(withoutPrivateWorldData(input.settings));
+        const parts = splitBookSettings(incoming);
+        const patch = { ...base, ...(row.universeId ? parts.book : incoming) };
+        let effectiveWorld: Record<string, unknown> = {};
+        if (row.universeId) {
+          const worldRows = await tx.$queryRaw<Array<{ settings: unknown }>>`
+            SELECT settings FROM projects WHERE id = ${row.universeId} AND "ownerId" = ${req.user!.id} FOR UPDATE
+          `;
+          if (!worldRows[0]) return null;
+          const world = settingsRecord(worldRows[0].settings);
+          if ('worldTables' in parts.world) parts.world.worldTables = preserveWorldReaderRules(world.worldTables, mergeWorldTablePhotos(world.worldTables, parts.world.worldTables));
+          const worldSettings = { ...world, ...parts.world };
+          if (Object.keys(parts.world).length) {
+            await tx.project.update({ where: { id: row.universeId }, data: { settings: toJson(worldSettings) } });
+          }
+          effectiveWorld = splitBookSettings(worldSettings).world;
         }
+        if (!row.universeId && 'worldTables' in incoming) patch.worldTables = preserveWorldReaderRules(base.worldTables, mergeWorldTablePhotos(base.worldTables, incoming.worldTables));
         const project = await tx.project.update({
           where: { id: req.params.id },
           data: {
-            ...(input.name !== undefined && { name: input.name }),
+            ...(input.name !== undefined && {
+              name: input.name,
+              ...(!row.universeId && { universeName: row.universeName ?? row.name }),
+            }),
             ...(input.description !== undefined && { description: input.description }),
             settings: toJson(patch),
           },
         });
-        return { project, previous, patch };
+        return { project: { ...project, settings: { ...effectiveWorld, ...patch } }, previous, patch };
       });
       if (!locked) return reply.status(404).send({ error: 'Project not found' });
       const nextStatus = catalogStatus(locked.patch);
@@ -396,6 +456,10 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.delete<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
+    const owned = await prisma.project.findFirst({
+      where: { id: req.params.id, ownerId: req.user!.id }, select: { _count: { select: { books: true } } },
+    });
+    if (owned?._count.books) return reply.status(409).send({ error: 'В проекте есть другие книги. Сначала удалите их.' });
     const result = await prisma.project.deleteMany({
       where: { id: req.params.id, ownerId: req.user!.id },
     });

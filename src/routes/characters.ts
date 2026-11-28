@@ -1,9 +1,12 @@
+import { universeProjectId } from '../lib/universe.js';
 import type { FastifyPluginAsync } from 'fastify';
 
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
 import { prisma } from '../lib/prisma.js';
+import { env } from '../lib/env.js';
+import { thumbnailForPortrait } from '../lib/portraitThumb.js';
 import { assertProjectOwnership, getProjectAccess, toJson } from '../lib/access.js';
 import {
   characterCreateSchema,
@@ -14,6 +17,13 @@ import {
 } from '../lib/schemas.js';
 
 type ProjectParam = { projectId: string };
+type PortraitQuery = { portraitPreview?: string };
+
+function portraitPreview<T extends { portraitPath: string | null }>(character: T) {
+  return { ...character, hasPortrait: !!character.portraitPath,
+    portraitPath: character.portraitPath?.startsWith('data:') ? null : character.portraitPath };
+}
+
 type CharacterParam = { projectId: string; characterId: string };
 type RelationParam = { projectId: string; relationId: string };
 type GenealogyParam = { projectId: string; edgeId: string };
@@ -25,12 +35,15 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
 
   // ----- Character CRUD ----------------------------------------------------
 
-  app.get<{ Params: ProjectParam }>(
+  app.get<{ Params: ProjectParam; Querystring: PortraitQuery }>(
     '/api/projects/:projectId/characters',
     async (req, reply) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
         return reply.status(404).send({ error: 'Project not found' });
       }
+      const portraitColumns = req.query.portraitPreview === 'true'
+        ? Prisma.sql`NULL AS "portraitPath", COALESCE("portraitPath" <> '', false) AS "hasPortrait"`
+        : Prisma.sql`"portraitPath"`;
       // Лёгкий список для сайдбара: biography/summary/traits не тянем —
       // полная запись приходит fetchOne при выборе персонажа. projectId/
       // createdAt не используются фронтом в списке. $queryRaw: материализация
@@ -40,13 +53,13 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
           id: string; name: string;
           shortName: string | null; faction: string | null;
           gender: string | null;
-          status: string | null; portraitPath: string | null;
+          status: string | null; portraitPath: string | null; hasPortrait?: boolean;
           updatedAt: Date;
           metadata: unknown;
         }>
       >(Prisma.sql`
         SELECT id, name, "shortName", faction, gender, status,
-               "portraitPath", "updatedAt", metadata
+               ${portraitColumns}, "updatedAt", metadata
         FROM characters
         WHERE "projectId" = ${req.params.projectId}
         ORDER BY "updatedAt" DESC
@@ -84,7 +97,7 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  app.get<{ Params: CharacterParam }>(
+  app.get<{ Params: CharacterParam; Querystring: PortraitQuery }>(
     '/api/projects/:projectId/characters/:characterId',
     async (req, reply) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
@@ -94,11 +107,32 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
         where: { id: req.params.characterId, projectId: req.params.projectId },
       });
       if (!character) return reply.status(404).send({ error: 'Character not found' });
-      return { character };
+      return { character: req.query.portraitPreview === 'true' ? portraitPreview(character) : character };
     },
   );
 
-  app.patch<{ Params: CharacterParam }>(
+  app.get<{ Params: CharacterParam }>(
+    '/api/projects/:projectId/characters/:characterId/portrait-thumb',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'private, no-store');
+      if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
+        return reply.status(404).send({ error: 'Project not found' });
+      }
+      const character = await prisma.character.findFirst({
+        where: { id: req.params.characterId, projectId: req.params.projectId },
+        select: { portraitPath: true },
+      });
+      const image = character?.portraitPath
+        ? await thumbnailForPortrait(character.portraitPath, env.R2_PUBLIC_BASE_URL)
+        : null;
+      if (!image) return reply.status(404).send({ error: 'Portrait preview unavailable' });
+      return reply
+        .header('Cross-Origin-Resource-Policy', 'same-site')
+        .type('image/webp').send(image);
+    },
+  );
+
+  app.patch<{ Params: CharacterParam; Querystring: PortraitQuery }>(
     '/api/projects/:projectId/characters/:characterId',
     async (req, reply) => {
       if (!(await assertProjectOwnership(req.params.projectId, req.user!.id))) {
@@ -127,7 +161,7 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
       const character = await prisma.character.findUnique({
         where: { id: req.params.characterId },
       });
-      return { character };
+      return { character: character && req.query.portraitPreview === 'true' ? portraitPreview(character) : character };
     },
   );
 
@@ -479,6 +513,7 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
         select: { id: true },
       });
       if (!chapter) return reply.status(404).send({ error: 'Сцена не найдена' });
+      const worldId = await universeProjectId(req.params.projectId);
       const marker = `openwritter:scene:${chapter.id}`;
 
       const characters = input.characters.filter((row) => row.fromId !== row.toId);
@@ -487,17 +522,17 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
       const itemIds = [...new Set(items.flatMap((row) => [row.leftId, row.rightId]))];
       const [knownCharacters, knownItems] = await Promise.all([
         characterIds.length
-          ? prisma.character.findMany({ where: { projectId: req.params.projectId, id: { in: characterIds } }, select: { id: true } })
+          ? prisma.character.findMany({ where: { projectId: worldId, id: { in: characterIds } }, select: { id: true } })
           : [],
         itemIds.length
-          ? prisma.item.findMany({ where: { projectId: req.params.projectId, id: { in: itemIds } }, select: { id: true } })
+          ? prisma.item.findMany({ where: { projectId: worldId, id: { in: itemIds } }, select: { id: true } })
           : [],
       ]);
       const okCharacters = new Set(knownCharacters.map((row) => row.id));
       const okItems = new Set(knownItems.map((row) => row.id));
 
       await prisma.$transaction(async (tx) => {
-        await tx.characterRelation.deleteMany({ where: { projectId: req.params.projectId, description: marker } });
+        await tx.characterRelation.deleteMany({ where: { projectId: worldId, description: marker } });
         const seen = new Set<string>();
         for (const row of characters) {
           if (!okCharacters.has(row.fromId) || !okCharacters.has(row.toId)) continue;
@@ -511,7 +546,7 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
           if (manual) continue;
           await tx.characterRelation.create({
             data: {
-              projectId: req.params.projectId,
+              projectId: worldId,
               fromCharacterId: row.fromId,
               toCharacterId: row.toId,
               relationType: row.name,
@@ -522,7 +557,7 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const catalog = await tx.item.findMany({
-          where: { projectId: req.params.projectId },
+          where: { projectId: worldId },
           select: { id: true, name: true, metadata: true },
         });
         const byName = new Map(catalog.map((row) => [row.name.toLocaleLowerCase('ru-RU'), row]));
@@ -544,7 +579,7 @@ export const characterRoutes: FastifyPluginAsync = async (app) => {
           }
           const created = await tx.item.create({
             data: {
-              projectId: req.params.projectId,
+              projectId: worldId,
               name: row.name,
               category: 'other',
               metadata: toJson({ madeFrom, madeInChapter: chapter.id, source: 'manuscript', bond: row.name }),

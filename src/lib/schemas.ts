@@ -198,6 +198,7 @@ export const chapterStageEnum = z.enum(['new', 'writing', 'done', 'checked', 'pu
 export const chapterCreateSchema = z.object({
   parentId: nullableId,
   kind: chapterKindEnum,
+  firstScene: z.boolean().optional(),
   title: z.string().trim().min(1).max(300),
   summary: nullableString,
   content: jsonObject.optional(),
@@ -211,7 +212,7 @@ export const chapterCreateSchema = z.object({
   tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
 });
 
-export const chapterUpdateSchema = chapterCreateSchema.partial();
+export const chapterUpdateSchema = chapterCreateSchema.omit({ firstScene: true }).partial();
 
 // ----- Tag ------------------------------------------------------------------
 

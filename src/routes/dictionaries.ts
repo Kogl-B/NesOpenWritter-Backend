@@ -1,3 +1,4 @@
+import { universeProjectId } from '../lib/universe.js';
 import type { FastifyPluginAsync } from 'fastify';
 
 import { prisma } from '../lib/prisma.js';
@@ -11,9 +12,8 @@ export const dictionaryRoutes: FastifyPluginAsync = async (app) => {
 
   // Свои значения + значения текущего проекта. Чужие глобальные словари не видны.
   app.get('/api/dictionaries', async (req) => {
-    const projectId = typeof (req.query as { projectId?: string }).projectId === 'string'
-      ? (req.query as { projectId: string }).projectId
-      : undefined;
+    const requested = (req.query as { projectId?: string }).projectId;
+    const projectId = typeof requested === 'string' && requested ? await universeProjectId(requested) : undefined;
     const userId = req.user!.id;
     const entries = await prisma.dictionaryEntry.findMany({
       where: {
@@ -30,7 +30,7 @@ export const dictionaryRoutes: FastifyPluginAsync = async (app) => {
   app.post('/api/dictionaries', async (req, reply) => {
     const input = dictionaryCreateSchema.parse(req.body);
     const userId = req.user!.id;
-    const projectId = input.projectId ?? null;
+    const projectId = input.projectId ? await universeProjectId(input.projectId) : null;
     if (projectId) {
       const role = await getProjectAccess(projectId, userId);
       if (!role || role === 'viewer') {
@@ -68,7 +68,7 @@ export const dictionaryRoutes: FastifyPluginAsync = async (app) => {
     if (!entry || entry.userId !== req.user!.id) {
       return reply.status(404).send({ error: 'Запись словаря не найдена' });
     }
-    const projectId = input.projectId === undefined ? entry.projectId : input.projectId;
+    const projectId = input.projectId === undefined ? entry.projectId : input.projectId ? await universeProjectId(input.projectId) : null;
     if (projectId) {
       const role = await getProjectAccess(projectId, req.user!.id);
       if (!role || role === 'viewer') {

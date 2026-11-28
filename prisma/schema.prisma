@@ -466,6 +466,10 @@ model Project {
   settings    Json     @default("{}")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  universeId   String?
+  universeName String?
+  universe     Project?  @relation("UniverseBooks", fields: [universeId], references: [id], onDelete: Restrict)
+  books        Project[] @relation("UniverseBooks")
 
   owner               User                  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   characters          Character[]
@@ -497,6 +501,7 @@ model Project {
   storedFiles         StoredFile[]
 
   @@index([ownerId])
+  @@index([universeId])
   @@map("projects")
 }
 

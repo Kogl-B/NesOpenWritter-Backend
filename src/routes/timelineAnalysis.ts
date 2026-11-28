@@ -66,7 +66,7 @@ export const timelineAnalysisRoutes: FastifyPluginAsync = async (app) => {
     const referenceIds = current ? proposals.flatMap(({ relativeToEventId }, index) =>
       relativeToEventId && !decisions.has(index) ? [relativeToEventId] : []) : [];
     const references = referenceIds.length ? await prisma.timelineEvent.findMany({
-      where: { projectId, id: { in: referenceIds } }, select: { id: true, at: true },
+      where: { projectId: input.worldId, id: { in: referenceIds } }, select: { id: true, at: true },
     }) : [];
     const referenceDates = new Map(references.map(({ id, at }) => [id, at]));
     return {
@@ -123,7 +123,11 @@ export const timelineAnalysisRoutes: FastifyPluginAsync = async (app) => {
       const result = await prisma.$transaction(async (tx) => {
         // Общая для разбора блокировка сериализует подтверждения, включая два
         // предложения одного события из разных сцен.
-        await tx.$queryRaw`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`;
+        await tx.$queryRaw`
+          SELECT id FROM projects
+          WHERE id = COALESCE((SELECT "universeId" FROM projects WHERE id = ${projectId}), ${projectId})
+          FOR UPDATE
+        `;
         const job = await tx.aiJob.findFirst({
           where: { id: jobId, projectId, kind: 'timeline', status: 'done' },
           select: { timelineChapterId: true, timelineKey: true, result: true },
@@ -152,7 +156,7 @@ export const timelineAnalysisRoutes: FastifyPluginAsync = async (app) => {
         });
         if (decision.disposition === 'dismissed') return createReview(null);
 
-        const where = { projectId };
+        const where = { projectId: input.worldId };
         const target = decision.eventId
           ? await tx.timelineEvent.findFirst({ where: { ...where, id: decision.eventId }, select: { id: true, name: true, metadata: true } })
           : null;
@@ -201,7 +205,7 @@ export const timelineAnalysisRoutes: FastifyPluginAsync = async (app) => {
         const timelineAnalysis = { dateText, relativeToEventId: relativeTo?.id ?? null };
         const event = target ?? await tx.timelineEvent.create({
           data: {
-            projectId, name, summary: proposal.summary || null,
+            projectId: input.worldId, name, summary: proposal.summary || null,
             at: date.at, atNumeric: date.atNumeric, locationId: location?.id ?? null,
             metadata: { timelineAnalysis },
           },

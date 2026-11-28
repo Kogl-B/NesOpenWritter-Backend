@@ -109,7 +109,7 @@ export async function getUsageInfo(userId: string): Promise<UsageInfo> {
   const { plan, expiresAt } = await serviceAccess(prisma, userId);
   const tier = getTier(plan);
   const [owned, usedBytes] = await Promise.all([
-    prisma.project.count({ where: { ownerId: userId } }),
+    prisma.project.count({ where: { ownerId: userId, universeId: null } }),
     getStorageUsedBytes(userId),
   ]);
   const balance = await prisma.user.findUnique({

@@ -41,14 +41,15 @@ function manuscriptText(content: unknown) {
 export async function timelineInput(db: ManuscriptDb, projectId: string, chapterId: string) {
   const chapter = await db.chapter.findFirst({
     where: { id: chapterId, projectId },
-    select: { title: true, content: true, stage: true, project: { select: { settings: true } } },
+    select: { title: true, content: true, stage: true, project: { select: { settings: true, universeId: true } } },
   });
   if (!chapter) return null;
   const { text, mentions } = manuscriptText(chapter.content);
   const settings = timelineSettings(chapter.project.settings);
+  const worldId = chapter.project.universeId ?? projectId;
   const calendar = settings.calendarId
     ? await db.calendar.findFirst({
-        where: { id: settings.calendarId, projectId },
+        where: { id: settings.calendarId, projectId: worldId },
         select: { monthsPerYear: true, daysPerMonth: true, settings: true },
       })
     : null;
@@ -56,7 +57,7 @@ export async function timelineInput(db: ManuscriptDb, projectId: string, chapter
     ANALYSIS_VERSION, text, [...mentions].sort(), settings.start, settings.calendarId,
     calendar && [calendar.monthsPerYear, calendar.daysPerMonth, storyMonthNames(calendar)],
   ])).digest('hex');
-  return { chapter, text, mentions, settings, calendar, version };
+  return { chapter, text, mentions, settings, calendar, version, worldId };
 }
 
 export function checkTimelineSize(text: string) {
@@ -112,7 +113,7 @@ export async function extractTimeline(job: {
   checkTimelineSize(input.text);
   if (input.settings.calendarId && !input.calendar) throw new AiHttpError(409, 'Выбранный календарь удалён. Выберите календарь в настройках книги.');
 
-  const where = { projectId: job.projectId };
+  const where = { projectId: input.worldId };
   const select = { id: true, name: true };
   const [characters, items, locations, existing] = await Promise.all([
     prisma.character.findMany({ where, select }),

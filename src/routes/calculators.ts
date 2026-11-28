@@ -1,3 +1,4 @@
+import { universeProjectId } from '../lib/universe.js';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
@@ -214,19 +215,20 @@ export const calculatorRoutes: FastifyPluginAsync = async (app) => {
         select: { id: true },
       });
       if (!chapter) return reply.status(404).send({ error: 'Сцена не найдена' });
+      const worldId = await universeProjectId(req.params.projectId);
 
       const characterIds = [...new Set(input.entries.map((e) => e.characterId))];
       const calculatorIds = [...new Set(input.entries.map((e) => e.calculatorId))];
       const [characters, calculators] = await Promise.all([
         characterIds.length
           ? prisma.character.findMany({
-              where: { projectId: req.params.projectId, id: { in: characterIds } },
+              where: { projectId: worldId, id: { in: characterIds } },
               select: { id: true },
             })
           : [],
         calculatorIds.length
           ? prisma.calculator.findMany({
-              where: { projectId: req.params.projectId, id: { in: calculatorIds } },
+              where: { projectId: worldId, id: { in: calculatorIds } },
               select: { id: true },
             })
           : [],
@@ -237,12 +239,12 @@ export const calculatorRoutes: FastifyPluginAsync = async (app) => {
 
       await prisma.$transaction(async (tx) => {
         await tx.characterLedger.deleteMany({
-          where: { projectId: req.params.projectId, chapterId: chapter.id },
+          where: { projectId: worldId, chapterId: chapter.id },
         });
         if (rows.length === 0) return;
         await tx.characterLedger.createMany({
           data: rows.map((e) => ({
-            projectId: req.params.projectId,
+            projectId: worldId,
             characterId: e.characterId,
             calculatorId: e.calculatorId,
             chapterId: chapter.id,

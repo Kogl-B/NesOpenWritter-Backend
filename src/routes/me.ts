@@ -93,9 +93,14 @@ export const meRoutes: FastifyPluginAsync = async (app) => {
     const query = z.object({
       page: z.coerce.number().int().min(1).optional(),
       limit: z.coerce.number().int().min(1).max(PHOTO_PAGE).optional(),
+      q: z.string().trim().max(160).optional(),
     }).parse(req.query);
     const photos = await collectAccountPhotos(req.user!.id);
-    const page = pagePhotos(photos, query.page ?? 1, query.limit ?? PHOTO_PAGE);
+    const search = query.q?.toLocaleLowerCase('ru-RU');
+    const matches = search ? photos.filter(({ title, projectName, placeLabel }) =>
+      [title, projectName, placeLabel].some((value) => value.toLocaleLowerCase('ru-RU').includes(search)),
+    ) : photos;
+    const page = pagePhotos(matches, query.page ?? 1, query.limit ?? PHOTO_PAGE);
     const access = await accessForPage(req.user!.id, page.photos.map((photo) => photo.href));
     return {
       ...page,

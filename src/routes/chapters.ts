@@ -1,3 +1,4 @@
+import { settingsRecord, universeProjectId } from '../lib/universe.js';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 
 import { Prisma } from '@prisma/client';
@@ -82,6 +83,16 @@ function stageFieldsOf(
 type ChapterParam = { projectId: string; chapterId: string };
 type RevisionParam = { projectId: string; chapterId: string; revisionId: string };
 
+async function validateWorldLinks(projectId: string, input: { eventId?: string | null; locationId?: string | null }) {
+  if (!input.eventId && !input.locationId) return true;
+  const world = await universeProjectId(projectId);
+  const [event, location] = await Promise.all([
+    input.eventId ? prisma.timelineEvent.findFirst({ where: { id: input.eventId, projectId: world }, select: { id: true } }) : true,
+    input.locationId ? prisma.location.findFirst({ where: { id: input.locationId, projectId: world }, select: { id: true } }) : true,
+  ]);
+  return !!event && !!location;
+}
+
 export const chapterRoutes: FastifyPluginAsync = async (app) => {
   app.addHook('onRequest', async (req) => {
     app.requireAuth(req);
@@ -143,21 +154,23 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(404).send({ error: 'Project not found' });
       }
       const input = chapterCreateSchema.parse(req.body);
-      if (input.locationId && !await prisma.location.findFirst({
-        where: { id: input.locationId, projectId: req.params.projectId }, select: { id: true },
-      })) {
-        return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
+      const book = await prisma.project.findUnique({ where: { id: req.params.projectId }, select: { settings: true } });
+      if (!book) return reply.status(404).send({ error: 'Книга не найдена' });
+      const flat = settingsRecord(book.settings).structure === 'chapters';
+      if (input.kind === 'scene' && (flat || !input.parentId)) {
+        return reply.status(400).send({ error: flat ? 'В этой книге текст пишется прямо в главах' : 'Выберите главу для сцены' });
       }
       if (input.parentId) {
         const parent = await prisma.chapter.findFirst({
-          where: { id: input.parentId, projectId: req.params.projectId },
+          where: { id: input.parentId, projectId: req.params.projectId, kind: 'chapter' },
           select: { id: true },
         });
-        if (!parent) return reply.status(400).send({ error: 'Parent chapter not in project' });
+        if (!parent || input.kind !== 'scene') return reply.status(400).send({ error: 'Выберите главу этой книги' });
       }
-      if (input.eventId && !(await chapterEventIsInProject(input.eventId, req.params.projectId))) {
-        return reply.status(400).send({ error: 'Event not in project' });
+      if (!(await validateWorldLinks(req.params.projectId, input))) {
+        return reply.status(400).send({ error: 'Событие или локация не принадлежат этой вселенной' });
       }
+      const withScene = input.kind === 'chapter' && !!input.firstScene && !flat;
       let stageFields;
       try {
         stageFields = stageFieldsOf(input, null);
@@ -179,10 +192,20 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
           locationId: input.locationId ?? null,
           metadata: toJson(input.metadata),
           ...stageFields,
+          ...(withScene && { children: { create: {
+            projectId: req.params.projectId,
+            kind: 'scene',
+            title: 'Сцена 1',
+            orderIndex: 1,
+            eventId: input.eventId ?? null,
+            locationId: input.locationId ?? null,
+          } } }),
         },
+        include: { children: true },
       });
       if (input.content && isTimelineReady(chapter.stage)) await queueTimelineAfterSave(req, chapter.id);
-      return reply.status(201).send({ chapter });
+      const { children, ...record } = chapter;
+      return reply.status(201).send({ chapter: children[0] ? { ...record, firstScene: children[0] } : record });
     },
   );
 
@@ -213,7 +236,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
       }
       if (input.locationId && !await prisma.location.findFirst({
-        where: { id: input.locationId, projectId: req.params.projectId }, select: { id: true },
+        where: { id: input.locationId, projectId: await universeProjectId(req.params.projectId) }, select: { id: true },
       })) {
         return reply.status(400).send({ error: 'Связанный объект не найден в проекте' });
       }
@@ -227,7 +250,7 @@ export const chapterRoutes: FastifyPluginAsync = async (app) => {
         });
         if (!parent) return reply.status(400).send({ error: 'Parent chapter not in project' });
       }
-      if (input.eventId && !(await chapterEventIsInProject(input.eventId, req.params.projectId))) {
+      if (input.eventId && !(await chapterEventIsInProject(input.eventId, await universeProjectId(req.params.projectId)))) {
         return reply.status(400).send({ error: 'Event not in project' });
       }
       let currentPublishAt: Date | null = null;

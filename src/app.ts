@@ -1,3 +1,4 @@
+import { isUniverseSection, universeProjectId } from './lib/universe.js';
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import cookie from '@fastify/cookie';
@@ -155,13 +156,23 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(authPlugin);
 
   app.addHook('preHandler', async (req, reply) => {
-    if (isReadMethod(req.method) || !req.user || !req.routeOptions.url?.startsWith('/api/projects/:projectId/')) return;
-    const { projectId } = req.params as { projectId: string };
-    const role = await getProjectAccess(projectId, req.user.id);
-    if (role === 'viewer') {
+    const m = /^\/api\/projects\/([^/?]+)(?:\/([^/?]+))?/.exec(req.url);
+    if (!m) return;
+    const shared = isUniverseSection(m[2] ?? '');
+    const writing = !isReadMethod(req.method);
+    if (!shared && !writing) return;
+    const userId = req.user?.id;
+    if (!userId) return; // requireAuth обработает 401
+    const role = await getProjectAccess(m[1]!, userId);
+    if (writing && role === 'viewer') {
       return reply.status(403).send({
         error: 'Роль «Читатель» даёт доступ только для просмотра. Попросите владельца проекта изменить вашу роль.',
       });
+    }
+    if (shared && role) {
+      const params = req.params as { projectId?: string; id?: string };
+      if (params.projectId) params.projectId = await universeProjectId(params.projectId);
+      else if (params.id) params.id = await universeProjectId(params.id);
     }
   });
 

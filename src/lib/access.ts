@@ -4,20 +4,19 @@ import { prisma } from './prisma.js';
 export type ProjectRole = 'owner' | 'admin' | 'editor' | 'viewer';
 
 export async function getProjectAccess(projectId: string, userId: string): Promise<ProjectRole | null> {
+  const members = { where: { userId, status: 'active' }, select: { role: true }, take: 1 };
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     select: {
       ownerId: true,
-      ProjectCollaborator: {
-        where: { userId, status: 'active' },
-        select: { role: true },
-        take: 1,
-      },
+      ProjectCollaborator: members,
+      universe: { select: { ownerId: true, ProjectCollaborator: members } },
     },
   });
-  if (!project) return null;
-  if (project.ownerId === userId) return 'owner';
-  const role = project.ProjectCollaborator[0]?.role;
+  const scope = project?.universe ?? project;
+  if (!scope) return null;
+  if (scope.ownerId === userId) return 'owner';
+  const role = scope.ProjectCollaborator[0]?.role;
   return role === 'admin' || role === 'editor' || role === 'viewer' ? role : null;
 }
 
