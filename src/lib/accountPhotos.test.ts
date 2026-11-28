@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { imageUrlsFromText, isImageFile, mergePhotos, pagePhotos, photoHref, photosInSettings, type AccountPhoto } from './accountPhotos.js';
+import { filterAccountPhotos, imageUrlsFromText, isImageFile, mergePhotos, pagePhotos, photoHref, photosInSettings, type AccountPhoto } from './accountPhotos.js';
 
 function photo(patch: Partial<AccountPhoto> & Pick<AccountPhoto, 'href' | 'place'>): AccountPhoto {
   return {
@@ -71,5 +71,39 @@ describe('фото кабинета', () => {
     assert.equal(page.total, 30);
     assert.equal(page.page, 2);
     assert.equal(page.photos.length, 6);
+  });
+});
+
+describe('фильтры галереи', () => {
+  it('ищет по всему набору до пагинации и оставляет список доступных произведений', () => {
+    const rows = Array.from({ length: 28 }, (_, i) => photo({
+      href: `https://cdn.example/new-${i}.png`, place: 'file', title: `Кадр ${i}`,
+      at: '2026-11-28T00:00:00.000Z', projectId: 'first-book', projectName: 'Север',
+    }));
+    rows.push(photo({
+      href: 'https://cdn.example/old.png', title: 'На закате', place: 'table', placeLabel: 'Таблица',
+      projectId: 'second-book', projectName: 'Другая книга',
+    }));
+    const result = filterAccountPhotos([rows], { q: 'ЗАКАТЕ Другая', projectId: 'second-book' });
+    assert.deepEqual(pagePhotos(result.photos, 1, 24).photos.map(({ title }) => title), ['На закате']);
+    assert.deepEqual(new Set(result.projects.map(({ id }) => id)), new Set(['first-book', 'second-book']));
+  });
+
+  it('учитывает использование фото в нескольких произведениях и отличает применение от генерации', () => {
+    const href = 'https://cdn.example/reused.png';
+    const generation = new Map([[href, { place: 'table' as const, projectId: 'north' }]]);
+    const rows = [
+      photo({ href, place: 'table', projectId: 'north', projectName: 'Север' }),
+      photo({ href, place: 'portrait', projectId: 'south', projectName: 'Юг' }),
+      photo({ href: 'https://cdn.example/personal.png', place: 'avatar' }),
+    ];
+    const matched = filterAccountPhotos([rows], {
+      projectId: 'north', place: 'table', origin: 'ai', generationPlace: 'table', from: '2026-11-01', to: '2026-11-01',
+    }, generation).photos;
+    assert.equal(matched.length, 1);
+    assert.equal(matched[0]?.generationPlace, 'table');
+    assert.equal(filterAccountPhotos([rows], { projectId: 'south', generationPlace: 'table' }, generation).photos[0]?.place, 'portrait');
+    assert.equal(filterAccountPhotos([rows], { origin: 'unmarked', projectId: 'account' }, generation).photos[0]?.place, 'avatar');
+    assert.equal(filterAccountPhotos([rows], { origin: 'ai', to: '2026-10-31' }, generation).photos.length, 0);
   });
 });

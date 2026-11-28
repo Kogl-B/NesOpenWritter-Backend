@@ -4,7 +4,24 @@ import { syncStoredFiles } from './storedFileSync.js';
 
 export const PHOTO_PAGE = 24;
 
-export type PhotoPlace = 'avatar' | 'cover' | 'portrait' | 'item' | 'table' | 'manuscript' | 'blog' | 'map' | 'file';
+export const PHOTO_PLACES = ['avatar', 'cover', 'portrait', 'item', 'table', 'manuscript', 'blog', 'map', 'file'] as const;
+export type PhotoPlace = typeof PHOTO_PLACES[number];
+
+export interface PhotoFilters {
+  q?: string;
+  projectId?: string;
+  place?: PhotoPlace;
+  origin?: 'ai' | 'unmarked';
+  generationPlace?: PhotoPlace;
+  from?: string;
+  to?: string;
+  sort?: 'newest' | 'oldest' | 'title';
+}
+
+interface PhotoGeneration {
+  place: PhotoPlace;
+  projectId?: string;
+}
 
 const PLACE_LABEL: Record<PhotoPlace, string> = {
   avatar: 'Аватар',
@@ -37,6 +54,8 @@ export interface AccountPhoto {
   place: PhotoPlace;
   placeLabel: string;
   projectName: string;
+  projectId?: string;
+  generationPlace?: PhotoPlace;
   at: string;
 }
 
@@ -79,6 +98,7 @@ export function makePhoto(input: {
   title: string;
   place: PhotoPlace;
   projectName?: string;
+  projectId?: string;
   at?: string;
   publicBase?: string;
 }): AccountPhoto | null {
@@ -92,6 +112,7 @@ export function makePhoto(input: {
     place: input.place,
     placeLabel: PLACE_LABEL[input.place],
     projectName: (input.projectName ?? '').replace(/\s+/g, ' ').trim().slice(0, 160),
+    projectId: input.projectId,
     at: input.at && !Number.isNaN(Date.parse(input.at)) ? input.at : '1970-01-01T00:00:00.000Z',
   };
 }
@@ -102,7 +123,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 /** Обложка и фото ячеек таблиц мира. */
-export function photosInSettings(settings: unknown, projectName: string, at: string, publicBase = ''): AccountPhoto[] {
+export function photosInSettings(settings: unknown, projectName: string, at: string, publicBase = '', projectId?: string): AccountPhoto[] {
   const root = record(settings);
   const out: AccountPhoto[] = [];
   const cover = makePhoto({
@@ -110,6 +131,7 @@ export function photosInSettings(settings: unknown, projectName: string, at: str
     title: projectName || 'Обложка',
     place: 'cover',
     projectName,
+    projectId,
     at,
     publicBase,
   });
@@ -138,6 +160,7 @@ export function photosInSettings(settings: unknown, projectName: string, at: str
           title: [title, rowTitle].filter(Boolean).join(' · ') || 'Фото таблицы',
           place: 'table',
           projectName,
+          projectId,
           at,
           publicBase,
         });
@@ -158,6 +181,52 @@ export function mergePhotos(groups: AccountPhoto[][]): AccountPhoto[] {
   return [...byHref.values()].sort((left, right) => (
     right.at.localeCompare(left.at) || left.title.localeCompare(right.title, 'ru')
   ));
+}
+
+export function filterAccountPhotos(
+  groups: AccountPhoto[][],
+  filters: PhotoFilters = {},
+  generation: ReadonlyMap<string, PhotoGeneration> = new Map(),
+  projectNames: ReadonlyMap<string, string> = new Map(),
+): { photos: AccountPhoto[]; projects: { id: string; name: string }[] } {
+  const terms = filters.q?.trim().toLocaleLowerCase('ru').split(/\s+/).filter(Boolean) ?? [];
+  const projects = new Map<string, string>();
+  const matches: AccountPhoto[] = [];
+  for (const photo of groups.flat()) {
+    const generated = generation.get(photo.href);
+    const projectId = photo.projectId || generated?.projectId;
+    const projectName = photo.projectName || (projectId ? projectNames.get(projectId) ?? '' : '');
+    if (projectId && projectName) projects.set(projectId, projectName);
+    if (filters.projectId && (filters.projectId === 'account' ? projectId : projectId !== filters.projectId)) continue;
+    if (filters.place && photo.place !== filters.place) continue;
+    if ((filters.origin === 'ai' && !generated) || (filters.origin === 'unmarked' && generated)) continue;
+    if (filters.generationPlace && filters.generationPlace !== generated?.place) continue;
+    const day = photo.at.slice(0, 10);
+    if ((filters.from && day < filters.from) || (filters.to && day > filters.to)) continue;
+    if (terms.length) {
+      const searchable = [photo.title, projectName, photo.placeLabel, generated && PLACE_LABEL[generated.place]]
+        .filter(Boolean).join(' ').toLocaleLowerCase('ru');
+      if (!terms.every(term => searchable.includes(term))) continue;
+    }
+    matches.push({ ...photo, projectId, projectName, generationPlace: generated?.place });
+  }
+  const photos = mergePhotos([matches]);
+  if (filters.sort === 'oldest') photos.sort((a, b) => a.at.localeCompare(b.at));
+  if (filters.sort === 'title') photos.sort((a, b) => a.title.localeCompare(b.title, 'ru', { numeric: true }));
+  return {
+    photos,
+    projects: [...projects].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'ru')),
+  };
+}
+
+function generationPlace(kind: string, request: unknown): PhotoPlace {
+  if (kind === 'cover') return 'cover';
+  const input = record(request);
+  const deliver = record(input.deliver);
+  if (deliver.type === 'character-portrait') return 'portrait';
+  if (deliver.type === 'row-photo') return 'table';
+  if (input.galleryArea === 'manuscript') return 'manuscript';
+  return storedPlace(typeof deliver.kind === 'string' ? deliver.kind : '');
 }
 
 export function pagePhotos(photos: AccountPhoto[], page: number, limit: number): {
@@ -195,10 +264,10 @@ function storedPlace(kind: string): PhotoPlace {
 }
 
 /** Все картинки кабинета: файлы, обложки, портреты, таблицы, рукопись и блог. */
-export async function collectAccountPhotos(userId: string): Promise<AccountPhoto[]> {
+export async function collectAccountPhotos(userId: string, filters?: PhotoFilters) {
   await syncStoredFiles(userId).catch(() => {});
   const base = env.R2_PUBLIC_BASE_URL ?? '';
-  const [user, levels, projects, characters, items, files, chapters, posts] = await Promise.all([
+  const [user, levels, projects, characters, items, files, chapters, posts, jobs] = await Promise.all([
     prisma.user.findUnique({
       where: { id: userId },
       select: { image: true, settings: true, updatedAt: true },
@@ -213,19 +282,19 @@ export async function collectAccountPhotos(userId: string): Promise<AccountPhoto
     }),
     prisma.character.findMany({
       where: { project: { ownerId: userId }, portraitPath: { not: null } },
-      select: { name: true, portraitPath: true, updatedAt: true, project: { select: { name: true } } },
+      select: { name: true, portraitPath: true, updatedAt: true, project: { select: { id: true, name: true } } },
     }),
     prisma.item.findMany({
       where: { project: { ownerId: userId }, imagePath: { not: null } },
-      select: { name: true, imagePath: true, updatedAt: true, project: { select: { name: true } } },
+      select: { name: true, imagePath: true, updatedAt: true, project: { select: { id: true, name: true } } },
     }),
     prisma.storedFile.findMany({
       where: { userId },
-      select: { key: true, kind: true, createdAt: true, project: { select: { name: true } } },
+      select: { key: true, kind: true, createdAt: true, project: { select: { id: true, name: true } } },
       orderBy: { createdAt: 'desc' },
     }),
-    prisma.$queryRaw<Array<{ title: string; projectName: string; updatedAt: Date; content: string }>>`
-      SELECT c.title, p.name AS "projectName", c."updatedAt", c.content::text AS content
+    prisma.$queryRaw<Array<{ title: string; projectId: string; projectName: string; updatedAt: Date; content: string }>>`
+      SELECT c.title, p.id AS "projectId", p.name AS "projectName", c."updatedAt", c.content::text AS content
       FROM chapters c
       JOIN projects p ON p.id = c."projectId"
       WHERE p."ownerId" = ${userId}
@@ -251,15 +320,15 @@ export async function collectAccountPhotos(userId: string): Promise<AccountPhoto
           OR body LIKE '%.gif%'
         )
     `,
+    prisma.aiJob.findMany({
+      where: { userId, status: 'done', kind: { in: ['image', 'cover'] } },
+      select: { kind: true, projectId: true, request: true, result: true },
+      orderBy: { createdAt: 'asc' },
+    }),
   ]);
   const at = user?.updatedAt.toISOString() ?? new Date(0).toISOString();
   const settings = record(user?.settings);
-  const avatars: AccountPhoto[] = [];
-  const projectPhotos: AccountPhoto[] = [];
-  const entityPhotos: AccountPhoto[] = [];
-  const manuscriptPhotos: AccountPhoto[] = [];
-  const blogPhotos: AccountPhoto[] = [];
-  const storedPhotos: AccountPhoto[] = [];
+  const photos: AccountPhoto[] = [];
   const avatar = makePhoto({
     href: typeof settings.avatar === 'string' ? settings.avatar : (user?.image ?? ''),
     title: 'Аватар',
@@ -267,7 +336,7 @@ export async function collectAccountPhotos(userId: string): Promise<AccountPhoto
     at,
     publicBase: base,
   });
-  if (avatar) avatars.push(avatar);
+  if (avatar) photos.push(avatar);
   for (const level of levels) {
     const photo = makePhoto({
       href: level.avatar,
@@ -276,10 +345,10 @@ export async function collectAccountPhotos(userId: string): Promise<AccountPhoto
       at: level.updatedAt.toISOString(),
       publicBase: base,
     });
-    if (photo) avatars.push(photo);
+    if (photo) photos.push(photo);
   }
   for (const project of projects) {
-    projectPhotos.push(...photosInSettings(project.settings, project.name, project.updatedAt.toISOString(), base));
+    photos.push(...photosInSettings(project.settings, project.name, project.updatedAt.toISOString(), base, project.id));
   }
   for (const character of characters) {
     const photo = makePhoto({
@@ -287,10 +356,11 @@ export async function collectAccountPhotos(userId: string): Promise<AccountPhoto
       title: character.name,
       place: 'portrait',
       projectName: character.project.name,
+      projectId: character.project.id,
       at: character.updatedAt.toISOString(),
       publicBase: base,
     });
-    if (photo) entityPhotos.push(photo);
+    if (photo) photos.push(photo);
   }
   for (const item of items) {
     const photo = makePhoto({
@@ -298,10 +368,11 @@ export async function collectAccountPhotos(userId: string): Promise<AccountPhoto
       title: item.name,
       place: 'item',
       projectName: item.project.name,
+      projectId: item.project.id,
       at: item.updatedAt.toISOString(),
       publicBase: base,
     });
-    if (photo) entityPhotos.push(photo);
+    if (photo) photos.push(photo);
   }
   for (const chapter of chapters) {
     for (const href of imageUrlsFromText(chapter.content)) {
@@ -310,10 +381,11 @@ export async function collectAccountPhotos(userId: string): Promise<AccountPhoto
         title: chapter.title || 'Рукопись',
         place: 'manuscript',
         projectName: chapter.projectName,
+        projectId: chapter.projectId,
         at: chapter.updatedAt.toISOString(),
         publicBase: base,
       });
-      if (photo) manuscriptPhotos.push(photo);
+      if (photo) photos.push(photo);
     }
   }
   for (const post of posts) {
@@ -325,7 +397,7 @@ export async function collectAccountPhotos(userId: string): Promise<AccountPhoto
         at: post.updatedAt.toISOString(),
         publicBase: base,
       });
-      if (photo) blogPhotos.push(photo);
+      if (photo) photos.push(photo);
     }
   }
   for (const file of files) {
@@ -335,10 +407,21 @@ export async function collectAccountPhotos(userId: string): Promise<AccountPhoto
       title: fileTitle(file.key),
       place: storedPlace(file.kind),
       projectName: file.project?.name ?? '',
+      projectId: file.project?.id,
       at: file.createdAt.toISOString(),
       publicBase: base,
     });
-    if (photo) storedPhotos.push(photo);
+    if (photo) photos.push(photo);
   }
-  return mergePhotos([avatars, projectPhotos, entityPhotos, manuscriptPhotos, blogPhotos, storedPhotos]);
+  const projectNames = new Map(projects.map(({ id, name }) => [id, name]));
+  for (const file of files) {
+    if (file.project) projectNames.set(file.project.id, file.project.name);
+  }
+  const generation = new Map<string, PhotoGeneration>();
+  for (const job of jobs) {
+    const result = record(job.result);
+    const href = photoHref(result.href ?? result.src, base);
+    if (href) generation.set(href, { place: generationPlace(job.kind, job.request), projectId: job.projectId || undefined });
+  }
+  return filterAccountPhotos([photos], filters, generation, projectNames);
 }

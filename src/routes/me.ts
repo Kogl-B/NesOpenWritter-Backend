@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
-import { collectAccountPhotos, pagePhotos, PHOTO_PAGE } from '../lib/accountPhotos.js';
+import { collectAccountPhotos, pagePhotos, PHOTO_PAGE, PHOTO_PLACES } from '../lib/accountPhotos.js';
 import {
   accessForPage,
   emptyAccess,
@@ -12,6 +12,7 @@ import {
   savePhotoAccess,
 } from '../lib/photoAccess.js';
 import { prisma } from '../lib/prisma.js';
+import { parseProfileBioDocument, readProfileBio } from '../lib/profileBio.js';
 import { isR2Configured, isPersonalPhotoKey, objectSizeBytes, presignPersonalUpload, publicObjectUrl } from '../lib/r2.js';
 import { rememberStoredFile } from '../lib/storedFileSync.js';
 import { getUserPlan, getStorageUsedBytes } from './account.js';
@@ -33,6 +34,7 @@ const homeLayout = z.object({ left: homeBlocks, main: homeBlocks, right: homeBlo
 
 const profileSchema = z.object({
   name: z.string().trim().min(1).max(80),
+  bio: z.object({ text: z.string().max(500), document: z.unknown().nullable() }).optional(),
 });
 
 function avatarOk(value: unknown): boolean {
@@ -56,9 +58,35 @@ export const meRoutes: FastifyPluginAsync = async (app) => {
     });
   });
 
-  app.patch('/api/me/profile', async (req) => {
+  app.get<{ Params: { id: string } }>('/api/public/profile/:id/bio', async (req, reply) => {
+    const id = z.string().min(1).max(80).parse(req.params.id);
+    const author = await prisma.user.findUnique({ where: { id }, select: { settings: true } });
+    if (!author) return reply.status(404).send({ error: 'Автор не найден' });
+    return readProfileBio(author.settings);
+  });
+
+  app.patch('/api/me/profile', async (req, reply) => {
     app.requireAuth(req);
     const input = profileSchema.parse(req.body);
+    if (input.bio) {
+      const text = input.bio.text.trim();
+      const document = input.bio.document == null ? null : parseProfileBioDocument(input.bio.document, text);
+      if (input.bio.document != null && !document) {
+        return reply.status(400).send({ error: 'Не удалось сохранить оформление профиля. Проверьте текст.' });
+      }
+      const bioFields = JSON.stringify({ about: text, bio: text, bioDocument: document ? { text, document } : null });
+      const [saved] = await prisma.$queryRaw<Array<{ id: string; name: string; email: string; settings: Prisma.JsonValue; walletBalanceCents: bigint }>>`
+        UPDATE users
+        SET name = ${input.name},
+            settings = CASE WHEN jsonb_typeof(settings) = 'object' THEN settings ELSE '{}'::jsonb END || ${bioFields}::jsonb,
+            "updatedAt" = NOW()
+        WHERE id = ${req.user!.id}
+        RETURNING id, name, email, settings, "walletBalanceCents"
+      `;
+      if (!saved) return reply.status(404).send({ error: 'Профиль не найден' });
+      const { settings, walletBalanceCents, ...user } = saved;
+      return { user, settings: settingsWithWallet(settings, walletBalanceCents) };
+    }
     const user = await prisma.user.update({
       where: { id: req.user!.id },
       data: { name: input.name },
@@ -93,17 +121,21 @@ export const meRoutes: FastifyPluginAsync = async (app) => {
     const query = z.object({
       page: z.coerce.number().int().min(1).optional(),
       limit: z.coerce.number().int().min(1).max(PHOTO_PAGE).optional(),
-      q: z.string().trim().max(160).optional(),
+      q: z.string().trim().max(120).optional(),
+      projectId: z.string().min(1).max(120).optional(),
+      place: z.enum(PHOTO_PLACES).optional(),
+      origin: z.enum(['ai', 'unmarked']).optional(),
+      generationPlace: z.enum(PHOTO_PLACES).optional(),
+      from: z.string().date().optional(),
+      to: z.string().date().optional(),
+      sort: z.enum(['newest', 'oldest', 'title']).optional(),
     }).parse(req.query);
-    const photos = await collectAccountPhotos(req.user!.id);
-    const search = query.q?.toLocaleLowerCase('ru-RU');
-    const matches = search ? photos.filter(({ title, projectName, placeLabel }) =>
-      [title, projectName, placeLabel].some((value) => value.toLocaleLowerCase('ru-RU').includes(search)),
-    ) : photos;
-    const page = pagePhotos(matches, query.page ?? 1, query.limit ?? PHOTO_PAGE);
+    const { photos, projects } = await collectAccountPhotos(req.user!.id, query);
+    const page = pagePhotos(photos, query.page ?? 1, query.limit ?? PHOTO_PAGE);
     const access = await accessForPage(req.user!.id, page.photos.map((photo) => photo.href));
     return {
       ...page,
+      projects,
       photos: page.photos.map((photo) => ({
         ...photo,
         access: access.get(photo.href) ?? emptyAccess(),
@@ -205,29 +237,22 @@ export const meRoutes: FastifyPluginAsync = async (app) => {
     const q = input.q?.trim() ?? '';
     const page = input.page;
     const skip = (page - 1) * BLACKLIST_PAGE;
-    const found = input.kind === 'books'
-      ? await bookPage(q, skip)
-      : input.kind === 'blogs'
-        ? await blogPage(q, skip)
-        : await peoplePage(req.user!.id, q, skip);
+    const ids = input.scope === 'blocked' ? await blockedIds(req.user!.id, input.kind) : undefined;
+    const pageIds = ids && !q ? ids.slice(skip, skip + BLACKLIST_PAGE) : ids;
+    const offset = pageIds && !q ? 0 : skip;
+    const found = pageIds?.length === 0
+      ? { total: 0, items: [] }
+      : input.kind === 'books'
+        ? await bookPage(q, offset, pageIds)
+        : input.kind === 'blogs'
+          ? await blogPage(q, offset, pageIds)
+          : await peoplePage(req.user!.id, q, offset, pageIds);
+    if (ids && pageIds && !q) {
+      const byId = new Map(found.items.map(item => [item.id, item]));
+      const items = pageIds.map(id => byId.get(id) ?? { id, title: 'Недоступная запись', note: '' });
+      return { kind: input.kind, page, pageSize: BLACKLIST_PAGE, total: ids.length, items };
+    }
     return { kind: input.kind, page, pageSize: BLACKLIST_PAGE, total: found.total, items: found.items };
-  });
-
-  app.get('/api/me/wallet/balances', async (req) => {
-    app.requireAuth(req);
-    const wallet = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id }, select: walletSelect });
-    return { balances: currencyBalances(wallet) };
-  });
-
-  app.get('/api/me/wallet/quote', async (req, reply) => {
-    app.requireAuth(req);
-    reply.header('Cache-Control', 'private, no-store');
-    const { from, to, amountCents } = quoteSchema.parse(req.query);
-    if (from === to) return reply.status(400).send({ error: 'Выберите разные валюты.' });
-    const quote = await walletQuote(from, to, amountCents);
-    if (!quote) return reply.status(503).send({ error: 'Курс НБ РБ сейчас недоступен.' });
-    if (!quote.outputCents) return reply.status(400).send({ error: 'После обмена сумма меньше минимальной денежной единицы.' });
-    return { quote };
   });
 
   app.post('/api/me/wallet/transfer', async (req, reply) => {
@@ -286,9 +311,29 @@ const BLACKLIST_PAGE = 20;
 
 const blacklistQuery = z.object({
   kind: z.enum(['people', 'books', 'blogs']).default('people'),
+  scope: z.literal('blocked').optional(),
   q: z.string().max(80).optional(),
   page: z.coerce.number().int().min(1).max(500).default(1),
 });
+
+const BLOCK_SETTINGS = {
+  people: 'blockedAuthorIds',
+  books: 'blockedBookIds',
+  blogs: 'blockedBlogIds',
+} as const;
+
+async function blockedIds(userId: string, kind: keyof typeof BLOCK_SETTINGS): Promise<string[]> {
+  const account = await prisma.user.findUnique({ where: { id: userId }, select: { settings: true } });
+  const settings = account?.settings;
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return [];
+  const ids = settings[BLOCK_SETTINGS[kind]];
+  return Array.isArray(ids) ? [...new Set(ids.filter((id): id is string => typeof id === 'string' && !!id))] : [];
+}
+
+function restrictToIds(ids: string[] | undefined, column: Prisma.Sql): Prisma.Sql {
+  if (!ids) return Prisma.empty;
+  return ids.length ? Prisma.sql`AND ${column} IN (${Prisma.join(ids)})` : Prisma.sql`AND FALSE`;
+}
 
 function likePattern(q: string): string {
   return `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
@@ -299,8 +344,8 @@ function filterSql(q: string, columns: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`${columns} ILIKE ${likePattern(q)} ESCAPE '\\'`;
 }
 
-async function peoplePage(meId: string, q: string, skip: number) {
-  const where = Prisma.sql`u.id <> ${meId} AND ${filterSql(q, Prisma.sql`COALESCE(u.name, '')`)}`;
+async function peoplePage(meId: string, q: string, skip: number, ids?: string[]) {
+  const where = Prisma.sql`u.id <> ${meId} AND ${filterSql(q, Prisma.sql`COALESCE(u.name, '')`)} ${restrictToIds(ids, Prisma.sql`u.id`)}`;
   const total = await prisma.$queryRaw<Array<{ total: number }>>`
     SELECT COUNT(*)::int AS total FROM users u WHERE ${where}
   `;
@@ -328,10 +373,11 @@ async function peoplePage(meId: string, q: string, skip: number) {
   };
 }
 
-async function bookPage(q: string, skip: number) {
+async function bookPage(q: string, skip: number, ids?: string[]) {
   const where = Prisma.sql`
     COALESCE(p.settings #>> '{catalog,published}', '') = 'true'
     AND ${filterSql(q, Prisma.sql`p.name || ' ' || COALESCE(u.name, '')`)}
+    ${restrictToIds(ids, Prisma.sql`p.id`)}
   `;
   const total = await prisma.$queryRaw<Array<{ total: number }>>`
     SELECT COUNT(*)::int AS total
@@ -351,10 +397,11 @@ async function bookPage(q: string, skip: number) {
   };
 }
 
-async function blogPage(q: string, skip: number) {
+async function blogPage(q: string, skip: number, ids?: string[]) {
   const where = Prisma.sql`
     b.published = true
     AND ${filterSql(q, Prisma.sql`b.title || ' ' || COALESCE(u.name, '')`)}
+    ${restrictToIds(ids, Prisma.sql`b.id`)}
   `;
   const total = await prisma.$queryRaw<Array<{ total: number }>>`
     SELECT COUNT(*)::int AS total
@@ -379,6 +426,7 @@ const quoteSchema = z.object({
   to: z.enum(CURRENCIES),
   amountCents: z.coerce.number().int().min(1).max(10_000_000),
 });
+
 const transferSchema = z.union([
   quoteSchema.extend({ requestId: z.string().uuid(), quoteId: z.string().min(1).max(180) }),
   z.object({

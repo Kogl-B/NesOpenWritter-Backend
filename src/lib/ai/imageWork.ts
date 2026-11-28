@@ -37,6 +37,7 @@ const deliverSchema = z.object({
 });
 
 const imageRequestSchema = z.object({
+  galleryArea: z.literal('manuscript').optional(),
   prompt: z.string().trim().min(1).max(4000),
   mode: z.enum(OPENAI_IMAGE_MODELS).optional(),
   reference: z.string().trim().max(1_500_000).optional(),
